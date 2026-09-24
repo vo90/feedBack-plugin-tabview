@@ -451,8 +451,14 @@ def _create_beats(events, m_info, voice, num_strings, remap=None):
                 if gp_str in seen:
                     continue
                 seen.add(gp_str)
+                # FeedPak uses 127 + mute for an unpitched dead note. GP5 has
+                # no such sentinel: alphaTab treats its numeric value as pitch
+                # even for dead notes, producing ledger lines far above the
+                # staff. Use GP5's neutral dead-note value and retain the X;
+                # keep explicit frets on other muted notes unchanged.
+                gp_fret = 0 if nd.get("mute") and nd["fret"] == 127 else nd["fret"]
                 note = guitarpro.Note(
-                    beat, value=nd["fret"], string=gp_str,
+                    beat, value=gp_fret, string=gp_str,
                     velocity=guitarpro.Velocities.forte,
                     type=guitarpro.NoteType.normal,
                 )
