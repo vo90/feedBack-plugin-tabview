@@ -116,6 +116,46 @@ function _tvApplyHarmonicMap(score, entries, model) {
 }
 const ALPHATAB_CDN_BASE = 'https://cdn.jsdelivr.net/npm/@coderline/alphatab@' + ALPHATAB_VERSION + '/dist';
 
+function _tvApplyWhammyMap(score, mapping, model) {
+    if (!mapping) return score;
+    if (mapping.version!==1 || !Array.isArray(mapping.notes) || !Array.isArray(mapping.beats))
+        throw new Error('Unsupported bar-expression mapping');
+    const locate=e=>score.tracks[e.track]?.staves[e.staff]?.bars[e.bar]?.voices[e.voice]?.beats[e.beat];
+    const sources=new Map(),addresses=new Set();
+    for(const e of mapping.notes) {
+        const key=[e.track,e.staff,e.bar,e.voice,e.beat,e.string].join(':');
+        const candidates=locate(e)?.notes.filter(n=>n.string===e.string) || [];
+        if(addresses.has(key) || sources.has(e.sourceId) || candidates.length!==1 || candidates[0].fret!==e.fret)
+            throw new Error('Bar-expression mapping does not match the tab');
+        if(e.expression?.version!==1 || e.expression.policy!=='optional' || !Array.isArray(e.expression.segments))
+            throw new Error('Invalid mapped bar expression');
+        addresses.add(key);sources.set(e.sourceId,e);
+        candidates[0].feedBackWhammy=JSON.parse(JSON.stringify(e));
+    }
+    const seen=new Set();
+    for(const e of mapping.beats) {
+        const key=[e.track,e.staff,e.bar,e.voice,e.beat].join(':');
+        const beat=locate(e);
+        if(seen.has(key) || !beat || !Array.isArray(e.members) || !e.members.length || e.members.some(id=>!sources.has(id)))
+            throw new Error('Invalid bar-expression beat membership');
+        seen.add(key);
+        if(!Array.isArray(e.points) || e.points.some((p,i)=>!Number.isFinite(p.position) || p.position < -.000001 || p.position>60.000001
+            || !Number.isFinite(p.semitones) || p.semitones < -16 || p.semitones>8 || i>0 && p.position<e.points[i-1].position))
+            throw new Error('Invalid bar-expression points');
+        if(e.vibrato!==null && !['slight','wide'].includes(e.vibrato)) throw new Error('Invalid bar vibrato');
+        beat.whammyBarPoints=null;beat.minWhammyPoint=null;beat.maxWhammyPoint=null;beat.whammyBarType=model.WhammyType.None;
+        for(const p of e.points)beat.addWhammyBarPoint(new model.BendPoint(Math.max(0,Math.min(60,p.position)),p.semitones*2));
+        if(e.vibrato)beat.vibrato=e.vibrato==='wide'?model.VibratoType.Wide:model.VibratoType.Slight;
+        // A GP display beat can combine multiple source beats. Show a BAR
+        // cue in that case, preserving exact curves without drawing a false
+        // merged pitch path. The game continues to use the original chart.
+        if(e.limitation)beat.text=((beat.text || '')+' BAR').trim();
+        beat.feedBackWhammy=JSON.parse(JSON.stringify(e));
+    }
+    score.feedBackWhammyLimitations=JSON.parse(JSON.stringify(mapping.limitations || []));
+    return score;
+}
+
 // Matches rs2gp.py:TICKS_PER_BEAT. The GP5 builder places the first measure
 // at tick TICKS_PER_BEAT (one beat in), hence the baseline offset added in
 // _tvTimeToTick and subtracted back out in _tvSyncCursor before looking the
@@ -555,7 +595,7 @@ function createFactory() {
 
     // ── alphaTab init ───────────────────────────────────────────────
 
-    async function _tvInitAlphaTab(arrayBuffer, myToken, harmonicMap) {
+    async function _tvInitAlphaTab(arrayBuffer, myToken, harmonicMap, barMap) {
         const c = _tvCreateContainer();
         if (!c) return;
 
@@ -595,6 +635,7 @@ function createFactory() {
         importSettings.fillFromJson(settings);
         const score = alphaTab.importer.ScoreLoader.loadScoreFromBytes(bytes, importSettings);
         if (harmonicMap) _tvApplyHarmonicMap(score, harmonicMap, alphaTab.model);
+        if (barMap) _tvApplyWhammyMap(score, barMap, alphaTab.model);
         if (_tvNeedsHarmonicBands(score)) {
             _tvSeparateHarmonicBands(alphaTab);
             // Factories above belong to this JS environment, not a separate
@@ -719,7 +760,7 @@ function createFactory() {
             const resp = await fetch(url);
             if (_tvInitToken !== myToken) return;
             if (!resp.ok) throw new Error(await resp.text());
-            let data, harmonicMap;
+            let data, harmonicMap, barMap;
             if ((resp.headers.get('content-type') || '').includes('application/json')) {
                 const bundle=await resp.json();
                 if (bundle.version!==1) throw new Error('Unsupported tab mapping version');
@@ -728,6 +769,7 @@ function createFactory() {
                     n=>n.toString(16).padStart(2,'0')).join('');
                 if (digest!==bundle.sha256) throw new Error('Tab mapping integrity check failed');
                 harmonicMap=bundle.harmonics;
+                barMap=bundle.whammy;
             } else data=await resp.arrayBuffer();
             if (_tvInitToken !== myToken) return;
 
@@ -746,7 +788,7 @@ function createFactory() {
                 return;
             }
             _tvSizeContainer();
-            await _tvInitAlphaTab(data, myToken, harmonicMap);
+            await _tvInitAlphaTab(data, myToken, harmonicMap, barMap);
 
             if (_tvInitToken !== myToken) return;
             _tvCurrentFile = filename;
