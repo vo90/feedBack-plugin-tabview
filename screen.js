@@ -54,6 +54,38 @@ let _nextInstanceId = 0;
 // this when the alphaTab CDN publishes a version tested against the
 // cursor-sync / tab-highlight behavior below.
 const ALPHATAB_VERSION = '1.8.2';
+function _tvNeedsHarmonicBands(score) {
+    for (const track of score.tracks) for (const staff of track.staves) for (const bar of staff.bars) {
+        const onsets = new Map();
+        for (const voice of bar.voices) for (const beat of voice.beats) {
+            let effects = onsets.get(beat.absoluteDisplayStart);
+            if (!effects) onsets.set(beat.absoluteDisplayStart, effects = new Set());
+            for (const note of beat.notes) {
+                if (note.harmonicType > 0) effects.add('harmonic-' + note.harmonicType);
+                if (note.isPalmMute) effects.add('palm-mute');
+            }
+            if (effects.size > 1 && [...effects].some(e => e.startsWith('harmonic-'))) return true;
+        }
+    }
+    return false;
+}
+
+function _tvSeparateHarmonicBands(library) {
+    // Pinned 1.8.2 treats two effects starting on the same beat as a continuation
+    // and lets them share one slot. Reserve distinct rows via its effect-factory
+    // option; never change the notes, suppress an instruction or patch a prototype.
+    const bands = library.Environment?.defaultRenderers?.flatMap(f => f.effectBands || []) || [];
+    const selected = bands.filter(b => b.effect.notationElement === library.NotationElement.EffectHarmonics
+        || b.effect.notationElement === library.NotationElement.EffectPalmMute);
+    const ids = selected.map(b => b.effect.effectId).sort();
+    const expected = ['harmonics-natural','harmonics-artificial','harmonics-pinch','harmonics-tap',
+        'harmonics-semi','harmonics-feedback',String(library.NotationElement.EffectPalmMute)].sort();
+    if (ids.join('|') !== expected.join('|')) throw new Error('Unsupported tablature effect layout');
+    for (const {effect} of selected) {
+        if (effect.canShareBand) Object.defineProperty(effect, 'canShareBand', {value:false, configurable:true});
+    }
+}
+
 function _tvApplyHarmonicMap(score, entries, model) {
     if (!Array.isArray(entries)) throw new Error('Missing harmonic note mapping');
     const seen=new Set();
@@ -538,7 +570,7 @@ function createFactory() {
         _tvLastBeat = null;
         if (_tvAtMount) _tvAtMount.innerHTML = '';
 
-        _tvApi = new alphaTab.AlphaTabApi(_tvAtMount, {
+        const settings = {
             core: {
                 fontDirectory: ALPHATAB_CDN_BASE + '/font/',
                 // Build the bounds lookup during layout so we can map a
@@ -557,7 +589,19 @@ function createFactory() {
                 // old .at-cursor-bar marker relied on (slopsmith#734).
                 enablePlayer: false,
             },
-        });
+        };
+        const bytes = new Uint8Array(arrayBuffer);
+        const importSettings = new alphaTab.Settings();
+        importSettings.fillFromJson(settings);
+        const score = alphaTab.importer.ScoreLoader.loadScoreFromBytes(bytes, importSettings);
+        if (harmonicMap) _tvApplyHarmonicMap(score, harmonicMap, alphaTab.model);
+        if (_tvNeedsHarmonicBands(score)) {
+            _tvSeparateHarmonicBands(alphaTab);
+            // Factories above belong to this JS environment, not a separate
+            // worker. Only compound-effect scores need the local renderer.
+            settings.core.useWorkers = false;
+        }
+        _tvApi = new alphaTab.AlphaTabApi(_tvAtMount, settings);
 
         // On load, flatten the score into a tick-sorted beat timeline so
         // _tvSyncCursor can resolve the current playback tick → Beat →
@@ -630,14 +674,7 @@ function createFactory() {
             _tvShowErrorBanner(msg);
         });
 
-        const bytes=new Uint8Array(arrayBuffer);
-        if (harmonicMap) {
-            const score=alphaTab.importer.ScoreLoader.loadScoreFromBytes(bytes,_tvApi.settings);
-            _tvApplyHarmonicMap(score,harmonicMap,alphaTab.model);
-            _tvApi.load(score);
-        } else {
-            _tvApi.load(bytes);
-        }
+        _tvApi.load(score);
     }
 
     async function _tvFetchAndInit(filename, arrIdx, myToken) {
