@@ -219,6 +219,7 @@ _NOTE_FIELDS = [
     "tremolo",
     "accent",
     "tap",
+    "pick_scrape_marks",
 ]
 
 
@@ -456,7 +457,8 @@ def _create_beats(events, m_info, voice, num_strings, remap=None):
                 # even for dead notes, producing ledger lines far above the
                 # staff. Use GP5's neutral dead-note value and retain the X;
                 # keep explicit frets on other muted notes unchanged.
-                gp_fret = 0 if nd.get("mute") and nd["fret"] == 127 else nd["fret"]
+                scrape = nd.get("pick_scrape_marks") if nd.get("mute") else None
+                gp_fret = 0 if nd.get("mute") and (nd["fret"] == 127 or scrape) else nd["fret"]
                 note = guitarpro.Note(
                     beat, value=gp_fret, string=gp_str,
                     velocity=guitarpro.Velocities.forte,
@@ -464,6 +466,13 @@ def _create_beats(events, m_info, voice, num_strings, remap=None):
                 )
                 if nd.get("mute"):
                     note.type = guitarpro.NoteType.dead
+                if scrape:
+                    # GP5 has no typed pick-scrape interval. Label the X on the
+                    # correct string instead of fabricating pitched slide ends.
+                    # Exact timing remains in the FeedPak; this is display export.
+                    label = "PICK SCRAPE " + " then ".join(m["direction"] for m in scrape)
+                    if label not in (beat.text or ""):
+                        beat.text = ((beat.text or "") + "; " + label).strip("; ")
                 _apply_effects(note, nd)
                 beat.notes.append(note)
 
