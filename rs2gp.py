@@ -1,6 +1,8 @@
 """Convert arrangement data to Guitar Pro 5 format."""
 
 import io
+import base64
+import hashlib
 import guitarpro
 from song import arrangement_string_count
 
@@ -30,7 +32,7 @@ BASS_STANDARD = {
 }
 
 
-def arrangement_to_gp5(song, arrangement_index=0):
+def arrangement_to_gp5(song, arrangement_index=0, include_harmonics=False):
     """Convert a Song arrangement to GP5 bytes."""
     arr = song.arrangements[arrangement_index]
 
@@ -101,6 +103,7 @@ def arrangement_to_gp5(song, arrangement_index=0):
 
     tick = TICKS_PER_BEAT
     prev_bpm = gp.tempo
+    harmonic_notes = {}
 
     for i, m_info in enumerate(measures_info):
         header = guitarpro.MeasureHeader(number=i + 1, start=tick)
@@ -117,7 +120,7 @@ def arrangement_to_gp5(song, arrangement_index=0):
 
         measure = guitarpro.Measure(track, header)
         voice = measure.voices[0]
-        voice.beats = _create_beats(m_events, m_info, voice, num_strings, remap)
+        voice.beats = _create_beats(m_events, m_info, voice, num_strings, remap, harmonic_notes)
 
         # Tempo change via MixTableChange on the first beat
         cur_bpm = max(30, min(300, round(m_info["bpm"])))
@@ -135,7 +138,23 @@ def arrangement_to_gp5(song, arrangement_index=0):
 
     buf = io.BytesIO()
     guitarpro.write(gp, buf)
-    return buf.getvalue()
+    data = buf.getvalue()
+    if not include_harmonics:
+        return data
+    # Addresses refer to the generated model, before serialization. Never
+    # match by approximate time/fret after GP5 has quantized the rhythm.
+    mapping = []
+    for bar, measure in enumerate(track.measures):
+        for vi, voice in enumerate(measure.voices):
+            for bi, beat in enumerate(voice.beats):
+                for note in beat.notes:
+                    evidence = harmonic_notes.get(id(note))
+                    if evidence:
+                        mapping.append(dict(track=0, staff=0, bar=bar, voice=vi, beat=bi,
+                            string=len(track.strings) + 1 - note.string,
+                            gpString=note.string, fret=note.value, **evidence))
+    return {"version":1, "gp5":base64.b64encode(data).decode('ascii'),
+            "sha256":hashlib.sha256(data).hexdigest(), "harmonics":mapping}
 
 
 # ---------------------------------------------------------------------------
@@ -214,6 +233,11 @@ _NOTE_FIELDS = [
     "pull_off",
     "harmonic",
     "harmonic_pinch",
+    "harmonic_target",
+    "harmonic_node",
+    "harmonic_pitch",
+    "harmonic_alias",
+    "ghost",
     "palm_mute",
     "mute",
     "tremolo",
@@ -232,20 +256,21 @@ def _note_dict(n):
 
 def _merge_events(arr):
     events = []
-    for n in arr.notes:
+    for index, n in enumerate(arr.notes):
         ev = _note_dict(n)
         ev["time"] = n.time
         ev["type"] = "note"
+        ev["source_id"] = f"note:{index}"
         events.append(ev)
 
-    for ch in arr.chords:
+    for index, ch in enumerate(arr.chords):
         if ch.high_density:
             continue
         events.append(
             {
                 "time": ch.time,
                 "type": "chord",
-                "chord_notes": [_note_dict(cn) for cn in ch.notes],
+                "chord_notes": [dict(_note_dict(cn), source_id=f"chord:{index}:{ni}") for ni,cn in enumerate(ch.notes)],
             }
         )
 
@@ -404,7 +429,7 @@ def _dur_sixteenths(d):
     return max(v, 1)
 
 
-def _create_beats(events, m_info, voice, num_strings, remap=None):
+def _create_beats(events, m_info, voice, num_strings, remap=None, harmonic_notes=None):
     """Build GP Beat list for one measure."""
     total = m_info["num_beats"] * SUBDIV
 
@@ -474,6 +499,12 @@ def _create_beats(events, m_info, voice, num_strings, remap=None):
                     if label not in (beat.text or ""):
                         beat.text = ((beat.text or "") + "; " + label).strip("; ")
                 _apply_effects(note, nd)
+                if harmonic_notes is not None and (nd.get('harmonic_target') or nd.get('harmonic_node')):
+                    harmonic_notes[id(note)] = {
+                        'sourceId':nd.get('source_id'), 'target':nd.get('harmonic_target') or None,
+                        'naturalNode':nd.get('harmonic_node') or None,
+                        'naturalPitch':nd.get('harmonic_pitch') or None,
+                        'alias':nd.get('harmonic_alias') or None, 'ghost':bool(nd.get('ghost'))}
                 beat.notes.append(note)
 
         beats.append(beat)
@@ -504,6 +535,7 @@ def _rest_beats(sixteenths, voice):
 
 def _apply_effects(gp_note, nd):
     eff = gp_note.effect
+    eff.ghostNote = bool(nd.get('ghost'))
 
     if nd.get("hammer_on") or nd.get("pull_off"):
         eff.hammer = True
@@ -528,10 +560,7 @@ def _apply_effects(gp_note, nd):
     if nd.get("harmonic"):
         eff.harmonic = guitarpro.NaturalHarmonic()
     elif nd.get("harmonic_pinch"):
-        try:
-            eff.harmonic = guitarpro.PinchHarmonic()
-        except Exception:
-            eff.harmonic = guitarpro.NaturalHarmonic()
+        eff.harmonic = guitarpro.PinchHarmonic()
 
     if nd.get("palm_mute"):
         eff.palmMute = True

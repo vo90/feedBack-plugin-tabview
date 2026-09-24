@@ -54,6 +54,34 @@ let _nextInstanceId = 0;
 // this when the alphaTab CDN publishes a version tested against the
 // cursor-sync / tab-highlight behavior below.
 const ALPHATAB_VERSION = '1.8.2';
+function _tvApplyHarmonicMap(score, entries, model) {
+    if (!Array.isArray(entries)) throw new Error('Missing harmonic note mapping');
+    const seen=new Set();
+    for (const e of entries) {
+        const key=[e.track,e.staff,e.bar,e.voice,e.beat,e.string].join(':');
+        if (seen.has(key)) throw new Error('Duplicate harmonic note mapping');
+        seen.add(key);
+        const beat=score.tracks[e.track]?.staves[e.staff]?.bars[e.bar]?.voices[e.voice]?.beats[e.beat];
+        const matches=(beat?.notes || []).filter(n=>n.string===e.string);
+        if (matches.length!==1 || matches[0].fret!==e.fret) throw new Error('Harmonic mapping does not match the tab');
+        const n=matches[0],h=e.target;
+        n.isGhost=!!e.ghost;
+        if (h) {
+            const types={pinch:model.HarmonicType.Pinch,artificial:model.HarmonicType.Artificial,
+                tapped:model.HarmonicType.Tap,semi:model.HarmonicType.Pinch,feedback:model.HarmonicType.None};
+            if (!Object.hasOwn(types,h.kind) || !Number.isFinite(h.node)) throw new Error('Unsupported harmonic mapping');
+            n.harmonicType=types[h.kind];
+            n.harmonicValue=h.kind==='feedback' ? 0 : h.node;
+        } else {
+            if (!Number.isFinite(e.naturalNode) || e.naturalNode<=0) throw new Error('Invalid natural harmonic mapping');
+            n.harmonicType=model.HarmonicType.Natural;
+            n.harmonicValue=e.naturalNode;
+        }
+        // Retain the original instruction separately from gameplay identity.
+        n.feedBackHarmonic=JSON.parse(JSON.stringify(e));
+    }
+    return score;
+}
 const ALPHATAB_CDN_BASE = 'https://cdn.jsdelivr.net/npm/@coderline/alphatab@' + ALPHATAB_VERSION + '/dist';
 
 // Matches rs2gp.py:TICKS_PER_BEAT. The GP5 builder places the first measure
@@ -495,7 +523,7 @@ function createFactory() {
 
     // ── alphaTab init ───────────────────────────────────────────────
 
-    async function _tvInitAlphaTab(arrayBuffer, myToken) {
+    async function _tvInitAlphaTab(arrayBuffer, myToken, harmonicMap) {
         const c = _tvCreateContainer();
         if (!c) return;
 
@@ -602,7 +630,14 @@ function createFactory() {
             _tvShowErrorBanner(msg);
         });
 
-        _tvApi.load(new Uint8Array(arrayBuffer));
+        const bytes=new Uint8Array(arrayBuffer);
+        if (harmonicMap) {
+            const score=alphaTab.importer.ScoreLoader.loadScoreFromBytes(bytes,_tvApi.settings);
+            _tvApplyHarmonicMap(score,harmonicMap,alphaTab.model);
+            _tvApi.load(score);
+        } else {
+            _tvApi.load(bytes);
+        }
     }
 
     async function _tvFetchAndInit(filename, arrIdx, myToken) {
@@ -643,11 +678,20 @@ function createFactory() {
                 console.warn('[TabView] decodeURIComponent failed; using raw filename:', filename, e);
             }
             const url = '/api/plugins/tabview/gp5/' + encodeURIComponent(decoded) +
-                '?arrangement=' + arrIdx;
+                '?arrangement=' + arrIdx + '&harmonics=true';
             const resp = await fetch(url);
             if (_tvInitToken !== myToken) return;
             if (!resp.ok) throw new Error(await resp.text());
-            const data = await resp.arrayBuffer();
+            let data, harmonicMap;
+            if ((resp.headers.get('content-type') || '').includes('application/json')) {
+                const bundle=await resp.json();
+                if (bundle.version!==1) throw new Error('Unsupported tab mapping version');
+                data=Uint8Array.from(atob(bundle.gp5),c=>c.charCodeAt(0));
+                const digest=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',data)),
+                    n=>n.toString(16).padStart(2,'0')).join('');
+                if (digest!==bundle.sha256) throw new Error('Tab mapping integrity check failed');
+                harmonicMap=bundle.harmonics;
+            } else data=await resp.arrayBuffer();
             if (_tvInitToken !== myToken) return;
 
             // _tvCreateContainer returns null when the mount target
@@ -665,7 +709,7 @@ function createFactory() {
                 return;
             }
             _tvSizeContainer();
-            await _tvInitAlphaTab(data, myToken);
+            await _tvInitAlphaTab(data, myToken, harmonicMap);
 
             if (_tvInitToken !== myToken) return;
             _tvCurrentFile = filename;

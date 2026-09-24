@@ -4,7 +4,7 @@ import sys
 import tempfile
 from pathlib import Path
 from fastapi import FastAPI
-from fastapi.responses import Response
+from fastapi.responses import Response, JSONResponse
 
 # Ensure the song lib is importable
 _lib = str(Path(__file__).resolve().parent.parent.parent / "lib")
@@ -27,11 +27,13 @@ def setup(app: FastAPI, context: dict):
 
     from rs2gp import arrangement_to_gp5
 
-    def _song_to_gp5(song, arrangement: int) -> Response:
+    def _song_to_gp5(song, arrangement: int, harmonics: bool = False) -> Response:
         if not song.arrangements:
             return Response("No arrangements found", status_code=404)
         idx = max(0, min(arrangement, len(song.arrangements) - 1))
-        gp5_bytes = arrangement_to_gp5(song, idx)
+        gp5_bytes = arrangement_to_gp5(song, idx, include_harmonics=harmonics)
+        if harmonics:
+            return JSONResponse(gp5_bytes)
         return Response(
             content=gp5_bytes,
             media_type="application/octet-stream",
@@ -39,7 +41,7 @@ def setup(app: FastAPI, context: dict):
         )
 
     @app.get("/api/plugins/tabview/gp5/{filename:path}")
-    def tabview_gp5(filename: str, arrangement: int = 0):
+    def tabview_gp5(filename: str, arrangement: int = 0, harmonics: bool = False):
         dlc = get_dlc_dir()
         if not dlc:
             return Response("DLC folder not configured", status_code=500)
@@ -80,7 +82,7 @@ def setup(app: FastAPI, context: dict):
                 cache = Path(raw_cache) if raw_cache is not None else Path(tempfile.gettempdir()) / "sloppak_cache"
                 cache.mkdir(parents=True, exist_ok=True)
                 loaded = sloppak_mod.load_song(filename, Path(dlc), cache)
-                return _song_to_gp5(loaded.song, arrangement)
+                return _song_to_gp5(loaded.song, arrangement, harmonics)
 
             # Any non-package input is unsupported.
             return Response(
