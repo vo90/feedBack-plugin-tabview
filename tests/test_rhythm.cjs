@@ -29,16 +29,24 @@ test('grace timing uses existing renderer positions',()=>{
  const beats=[beat(32,{graceType:1,absoluteDisplayStart:0}),beat(8,{absoluteDisplayStart:0})];
  assert.deepEqual(timeline(score(beats)).map(e=>e.start),[0,0]);
 });
-test('small paused seeks update marker and same-beat ticks avoid layout work',()=>{
+function cursorHarness(){
  const code=source.slice(source.indexOf('    function _tvSyncCursor('),source.indexOf('    // ── Self-driven cursor loop'));
  const run=new Function(`
  const TICKS_PER_BEAT=960,_tvApi={},_tvReady=true,_tvLatestBeats=[];
- let _tvLastTick=-1,_tvLastBeat=null,calls=0;
+ let _tvLastTick=-1,_tvLastBeat=null,_tvLastBounds=null,calls=0;
  const beats=[{}, {}, {}];
  const _tvTimeToTick=t=>t;
  const _tvFindBeatAtTick=t=>beats[Math.min(2,Math.floor(t/15))];
  const _tvUpdateMarker=()=>calls++;
  ${code}
- return times=>{times.forEach(_tvSyncCursor);return calls;};`)();
- assert.equal(run([960,975,976,990,975]),4);
+ return {run:times=>{times.forEach(_tvSyncCursor);return calls;},bounds:value=>{_tvApi.boundsLookup=value;}};`)();
+ return run;
+}
+test('small paused seeks update marker and same-beat ticks avoid layout work',()=>{
+ assert.equal(cursorHarness().run([960,975,976,990,975]),4);
+});
+test('paused cursor follows replacement layout bounds without repeated layout work',()=>{
+ const h=cursorHarness();h.bounds({});assert.equal(h.run([975,975]),1);
+ h.bounds(null);assert.equal(h.run([975]),2);
+ h.bounds({});assert.equal(h.run([975,975,976]),3);
 });

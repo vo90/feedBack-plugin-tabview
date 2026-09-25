@@ -501,6 +501,7 @@ function createFactory() {
     // re-place the marker without waiting for the next time tick.
     let _tvAtBeats = [];
     let _tvLastBeat = null;
+    let _tvLastBounds = null;
 
     // Latest beats snapshot — bundle.beats is the source of truth
     // under Wave C (the bare `highway` global used in Wave B was the
@@ -744,6 +745,7 @@ function createFactory() {
         _tvReady = false;
         _tvAtBeats = [];
         _tvLastBeat = null;
+        _tvLastBounds = null;
         if (_tvAtMount) _tvAtMount.innerHTML = '';
 
         const settings = {
@@ -827,13 +829,9 @@ function createFactory() {
             _tvFailedArr = null;
             // A successful render supersedes any prior error banner.
             _tvRemoveErrorBanner();
-            // renderFinished fires after EVERY (re)layout, including a
-            // resize-driven re-render. boundsLookup is freshly valid at
-            // this point, so re-place the marker from the last known beat:
-            // a width-change resize transiently nulls boundsLookup, and
-            // _tvSizeContainer's _tvUpdateMarker() call mid-relayout hides
-            // the marker — without this it would stay hidden while paused
-            // (or until _tvSyncCursor's tick advances >30) (slopsmith#734).
+            // Re-place the marker after rendering. alphaTab can publish its
+            // replacement boundsLookup after this callback, so the cursor
+            // loop also detects that replacement while playback is paused.
             // No-op on the first render (_tvLastBeat is null → marker hidden).
             _tvUpdateMarker();
         });
@@ -1026,9 +1024,11 @@ function createFactory() {
         if (!_tvApi || !_tvReady) return;
 
         const tick = _tvTimeToTick(currentTime, _tvLatestBeats);
+        const bounds = _tvApi.boundsLookup;
+        const layoutChanged = bounds !== _tvLastBounds;
         // A fixed 30-tick throttle can skip an entire short note or a paused
-        // seek. Only reposition the marker when the selected beat changes.
-        if (tick === _tvLastTick) return;
+        // seek. Reposition only when the selected beat or its layout changes.
+        if (tick === _tvLastTick && !layoutChanged) return;
         _tvLastTick = tick;
         // _tvTimeToTick adds a one-beat baseline because rs2gp starts the
         // first measure at tick TICKS_PER_BEAT; alphaTab's
@@ -1036,8 +1036,9 @@ function createFactory() {
         // looking the beat up. Floor at 0 for the very first beat.
         const lookupTick = Math.max(0, tick - TICKS_PER_BEAT);
         const beat = _tvFindBeatAtTick(lookupTick);
-        if (beat === _tvLastBeat) return;
+        if (beat === _tvLastBeat && !layoutChanged) return;
         _tvLastBeat = beat;
+        _tvLastBounds = bounds;
         _tvUpdateMarker();
     }
 
@@ -1176,6 +1177,7 @@ function createFactory() {
         _tvLatestBeats = null;
         _tvAtBeats = [];
         _tvLastBeat = null;
+        _tvLastBounds = null;
         if (_tvApi) {
             try { _tvApi.destroy(); } catch (_) {}
             _tvApi = null;
