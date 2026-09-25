@@ -156,6 +156,79 @@ function _tvApplyWhammyMap(score, mapping, model) {
     return score;
 }
 
+function _tvBarPitchLabel(value) {
+    // alphaTab labels bar depth in whole tones (four model units per tone).
+    const tones=value/4, magnitude=Math.abs(tones), quarters=Math.round(magnitude*4);
+    const sign=tones<0?'−':'';
+    if(Math.abs(magnitude*4-quarters)<1e-7) {
+        const whole=Math.floor(quarters/4), fraction=['','¼','½','¾'][quarters%4];
+        return sign+(whole?String(whole):fraction?'':'0')+fraction;
+    }
+    // Interpolated display-beat boundaries need a compact approximate label.
+    // The model, curve geometry and source mapping keep the unrounded value.
+    return '≈'+sign+Number(magnitude.toFixed(2));
+}
+
+const _tvBarFactories=new WeakSet();
+function _tvConfigureBarGlyphs(library) {
+    const effects=(library.Environment?.defaultRenderers || []).flatMap(f=>f.effectBands || [])
+        .map(b=>b.effect).filter(e=>e.notationElement===library.NotationElement.EffectWhammyBarLine);
+    if(effects.length!==1)throw new Error('Unsupported tablature bar layout');
+    for(const effect of effects) {
+        if(_tvBarFactories.has(effect))continue;
+        const create=effect.createNewGlyph;
+        effect.createNewGlyph=function(renderer,beat) {
+            const glyph=create.call(this,renderer,beat);
+            if(!beat.feedBackWhammy || !beat.hasWhammyBar)return glyph;
+            if(typeof glyph._paintWhammy!=='function' || !Array.isArray(glyph._renderPoints))
+                throw new Error('Unsupported tablature bar glyph');
+            // Rendering-only simplification of collinear samples prevents a
+            // label on every interpolated metrical boundary. Turns/resets stay.
+            const points=[];
+            for(const p of glyph._renderPoints) {
+                while(points.length>1) {
+                    const a=points[points.length-2],b=points[points.length-1];
+                    if(b.offset<=a.offset || p.offset<=b.offset ||
+                        Math.abs((b.value-a.value)*(p.offset-a.offset)-(p.value-a.value)*(b.offset-a.offset))>1e-7)break;
+                    points.pop();
+                }
+                points.push(p);
+            }
+            glyph._renderPoints=points;
+            // Pinned alphaTab skips height reservation for Custom curves and
+            // its log(abs(value)) offset can reverse very small pitch changes.
+            // Reserve the actual signed envelope without altering pitch data.
+            glyph._getOffset=function(value) {
+                return Math.sign(value)*this.renderer.smuflMetrics.tabWhammyPerHalfHeight*Math.log2(1+Math.abs(value));
+            };
+            glyph.doLayout=function() {
+                const canvas=this.renderer.scoreRenderer.canvas;
+                canvas.font=this.renderer.resources.tablatureFont;
+                const pad=canvas.measureText('−8').height+this.renderer.smuflMetrics.tabWhammyTextPadding;
+                const offsets=this._renderPoints.map(p=>this._getOffset(p.value));
+                this.topOffset=this.originalTopOffset=Math.max(0,...offsets)+pad;
+                this.bottomOffset=this.originalBottomOffset=Math.max(0,...offsets.map(v=>-v));
+                this.height=this.topOffset+this.bottomOffset;this.width=0;
+            };
+            const paint=glyph._paintWhammy;
+            glyph._paintWhammy=function(isFirst,first,second,cx,cy,dx,canvas,slurText) {
+                // Scope formatting to this glyph call. No global canvas,
+                // alphaTab prototype, model value or ordinary bend is patched.
+                const targetX=cx+dx*second.offset;
+                const formatted=new Proxy(canvas,{get(target,key){
+                    if(key==='fillText')return (text,x,y)=>target.fillText(
+                        x===targetX && text!==slurText ? _tvBarPitchLabel(second.value) : text,x,y);
+                    const value=Reflect.get(target,key,target);
+                    return typeof value==='function'?value.bind(target):value;
+                }});
+                return paint.call(this,isFirst,first,second,cx,cy,dx,formatted,slurText);
+            };
+            return glyph;
+        };
+        _tvBarFactories.add(effect);
+    }
+}
+
 // Matches rs2gp.py:TICKS_PER_BEAT. The GP5 builder places the first measure
 // at tick TICKS_PER_BEAT (one beat in), hence the baseline offset added in
 // _tvTimeToTick and subtracted back out in _tvSyncCursor before looking the
@@ -636,6 +709,10 @@ function createFactory() {
         const score = alphaTab.importer.ScoreLoader.loadScoreFromBytes(bytes, importSettings);
         if (harmonicMap) _tvApplyHarmonicMap(score, harmonicMap, alphaTab.model);
         if (barMap) _tvApplyWhammyMap(score, barMap, alphaTab.model);
+        if (barMap?.beats.some(b=>b.points.length)) {
+            _tvConfigureBarGlyphs(alphaTab);
+            settings.core.useWorkers = false;
+        }
         if (_tvNeedsHarmonicBands(score)) {
             _tvSeparateHarmonicBands(alphaTab);
             // Factories above belong to this JS environment, not a separate

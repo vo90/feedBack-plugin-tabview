@@ -50,3 +50,10 @@ Restart feedBack. The plugin loads automatically.
 | `routes.py` | FastAPI endpoint serving GP5 files |
 | `rs2gp.py` | arrangement → Guitar Pro 5 converter |
 | `screen.js` | Frontend: alphaTab integration, cursor sync, UI |
+
+Exact bar expressions retain their original pitch/time mapping. For mapped
+curves, the pinned alphaTab renderer reserves their vertical space and formats
+interpolated depths compactly (whole-tone units; `≈` marks rounded display text).
+Only collinear rendering samples are omitted. Notes, model points, source values
+and normal GP bends remain unchanged. These charts use the local renderer so
+the scoped formatting also applies when workers are otherwise enabled.
