@@ -3,7 +3,9 @@
 import io
 import base64
 import hashlib
+from copy import deepcopy
 import guitarpro
+import rhythm
 from whammy_map import build_mapping
 from harmonic_contacts import display_events, build_mapping as contact_mapping
 from song import arrangement_string_count
@@ -124,7 +126,10 @@ def arrangement_to_gp5(song, arrangement_index=0, include_harmonics=False):
 
         measure = guitarpro.Measure(track, header)
         voice = measure.voices[0]
-        voice.beats = _create_beats(m_events, m_info, voice, num_strings, remap, harmonic_notes, bar_notes, contact_notes)
+        try:
+            voice.beats = _create_beats(m_events, m_info, voice, num_strings, remap, harmonic_notes, bar_notes, contact_notes)
+        except rhythm.RhythmError as exc:
+            raise rhythm.RhythmError(f'Measure {i + 1}: {exc}') from exc
 
         # Tempo change via MixTableChange on the first beat
         cur_bpm = max(30, min(300, round(m_info["bpm"])))
@@ -157,8 +162,20 @@ def arrangement_to_gp5(song, arrangement_index=0, include_harmonics=False):
                         mapping.append(dict(track=0, staff=0, bar=bar, voice=vi, beat=bi,
                             string=len(track.strings) + 1 - note.string,
                             gpString=note.string, fret=note.value, **evidence))
+    # alphaTab 1.8.2's GP5 reader falls back to a quarter for value 128,
+    # although its score model/renderer supports 128ths. Bind that missing
+    # reader field to exact generated beat addresses in the hashed bundle.
+    short_durations = []
+    for bar, measure in enumerate(track.measures):
+        for vi, voice in enumerate(measure.voices):
+            for bi, beat in enumerate(voice.beats):
+                if beat.duration.value == 128:
+                    short_durations.append(dict(bar=bar, voice=vi, beat=bi, value=128,
+                        notes=[dict(string=len(track.strings)+1-n.string, fret=n.value,
+                                    dead=n.type==guitarpro.NoteType.dead) for n in beat.notes]))
     return {"version":1, "gp5":base64.b64encode(data).decode('ascii'),
             "sha256":hashlib.sha256(data).hexdigest(), "harmonics":mapping,
+            "rhythm":{"version":1,"shortDurations":short_durations},
             "whammy":build_mapping(track,measures_info,bar_notes),
             "harmonicContacts":contact_mapping(track,contact_notes)}
 
@@ -439,15 +456,17 @@ def _dur_sixteenths(d):
 
 def _create_beats(events, m_info, voice, num_strings, remap=None, harmonic_notes=None, bar_notes=None, contact_notes=None):
     """Build GP Beat list for one measure."""
-    total = m_info["num_beats"] * SUBDIV
-
     if not events:
-        return _rest_beats(total, voice)
+        return _rest_beats(m_info['num_beats'] * SUBDIV, voice)
+
+    grid, onset_slots = rhythm.layout(events, m_info)
+    total = m_info['num_beats'] * grid
+    decompose = _decompose_sixteenths if grid == SUBDIV else lambda n: rhythm.durations(n, grid)
+    duration_units = _dur_sixteenths if grid == SUBDIV else lambda d: rhythm.units(d, grid)
 
     slots = {}
     for ev in events:
-        pos = _quantize_sixteenth(ev["time"], m_info["beat_times"], m_info["end_time"])
-        pos = max(0, min(pos, total - 1))
+        pos = onset_slots[ev['time']]
         slots.setdefault(pos, []).append(ev)
 
     positions = sorted(slots.keys())
@@ -456,17 +475,18 @@ def _create_beats(events, m_info, voice, num_strings, remap=None, harmonic_notes
 
     for i, pos in enumerate(positions):
         if pos > cursor:
-            beats.extend(_rest_beats(pos - cursor, voice))
+            beats.extend(_rest_beats(pos - cursor, voice, grid))
             cursor = pos
 
         nxt = positions[i + 1] if i + 1 < len(positions) else total
         gap = max(1, nxt - pos)
-        durations = _decompose_sixteenths(gap)
+        durations = decompose(gap)
 
         beat = guitarpro.Beat(voice, status=guitarpro.BeatStatus.normal)
         beat.duration = durations[0]
 
         seen = set()
+        sounding_until = {}
         for ev in slots[pos]:
             note_dicts = (
                 ev.get("chord_notes", []) if ev["type"] == "chord" else [] if ev["type"] == "boundary" else [ev]
@@ -507,6 +527,7 @@ def _create_beats(events, m_info, voice, num_strings, remap=None, harmonic_notes
                     if label not in (beat.text or ""):
                         beat.text = ((beat.text or "") + "; " + label).strip("; ")
                 _apply_effects(note, nd)
+                sounding_until[id(note)] = ev['time'] + (nd.get('sustain') or 0)
                 if nd.get('display_tie'):note.type=guitarpro.NoteType.tie
                 if contact_notes is not None and nd.get('contact_source'):
                     contact_notes[id(note)]={**nd['contact_source'],'tie':bool(nd.get('display_tie'))}
@@ -526,29 +547,39 @@ def _create_beats(events, m_info, voice, num_strings, remap=None, harmonic_notes
 
         if not beat.notes:beat.status=guitarpro.BeatStatus.rest
         beats.append(beat)
-        cursor += _dur_sixteenths(durations[0])
+        cursor += duration_units(durations[0])
 
         for rd in durations[1:]:
-            owned=[n for n in beat.notes if contact_notes is not None and id(n) in contact_notes]
+            owned=[n for n in beat.notes if (contact_notes is not None and id(n) in contact_notes)
+                   or (grid != SUBDIV and sounding_until[id(n)] >= rhythm.seconds((cursor + duration_units(rd)) / grid, m_info) - 1e-7)]
             if owned:
                 tied=guitarpro.Beat(voice,status=guitarpro.BeatStatus.normal);tied.duration=rd
                 for original in owned:
                     note=guitarpro.Note(tied,value=original.value,string=original.string,type=guitarpro.NoteType.tie)
+                    # A split duration continues the note, without another HO/PO.
+                    if grid != SUBDIV:
+                        for effect in ('palmMute', 'vibrato', 'harmonic', 'ghostNote'):
+                            setattr(note.effect, effect, deepcopy(getattr(original.effect, effect)))
                     tied.notes.append(note)
-                    contact_notes[id(note)]={**contact_notes[id(original)],'tie':True}
+                    if contact_notes is not None and id(original) in contact_notes:
+                        contact_notes[id(note)]={**contact_notes[id(original)],'tie':True}
+                    if grid != SUBDIV and harmonic_notes is not None and id(original) in harmonic_notes:
+                        harmonic_notes[id(note)]=deepcopy(harmonic_notes[id(original)])
+                    if grid != SUBDIV and bar_notes is not None and id(original) in bar_notes:
+                        bar_notes[id(note)]=deepcopy(bar_notes[id(original)])
                 beats.append(tied)
-            else:beats.extend(_rest_beats(_dur_sixteenths(rd), voice))
-            cursor += _dur_sixteenths(rd)
+            else:beats.extend(_rest_beats(duration_units(rd), voice, grid))
+            cursor += duration_units(rd)
 
     if cursor < total:
-        beats.extend(_rest_beats(total - cursor, voice))
+        beats.extend(_rest_beats(total - cursor, voice, grid))
 
     return beats
 
 
-def _rest_beats(sixteenths, voice):
+def _rest_beats(sixteenths, voice, grid=SUBDIV):
     beats = []
-    for d in _decompose_sixteenths(sixteenths):
+    for d in (_decompose_sixteenths(sixteenths) if grid == SUBDIV else rhythm.durations(sixteenths, grid)):
         b = guitarpro.Beat(voice, status=guitarpro.BeatStatus.rest)
         b.duration = d
         beats.append(b)

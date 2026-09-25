@@ -356,6 +356,26 @@ function _resolveMount(highwayCanvas) {
 // Cursor sync helpers (stateless — beats come from the bundle)
 // ═══════════════════════════════════════════════════════════════════════
 
+// Restore the 128th-note duration that the pinned GP5 reader does not decode.
+// The renderer itself supports it. Match exact beat/note identities; never
+// infer a short note from neighbouring notes or change the playable chart.
+function _tvApplyRhythmMap(score, mapping) {
+    if (!mapping) return false;
+    if (mapping.version !== 1 || !Array.isArray(mapping.shortDurations)) throw new Error('Unsupported tab rhythm mapping');
+    const seen = new Set();
+    for (const e of mapping.shortDurations) {
+        const key = [e.bar,e.voice,e.beat].join(':');
+        const beat = score.tracks[0]?.staves[0]?.bars[e.bar]?.voices[e.voice]?.beats[e.beat];
+        if (seen.has(key) || !beat || e.value !== 128 || ![4,128].includes(beat.duration)
+            || !Array.isArray(e.notes) || e.notes.length !== beat.notes.length
+            || e.notes.some(n => !beat.notes.some(a => a.string === n.string &&
+                (n.dead ? a.isDead : a.fret === n.fret)))) throw new Error('Tab rhythm mapping does not match the score');
+        seen.add(key);
+        beat.duration = 128;
+    }
+    return seen.size > 0;
+}
+
 function _tvTimeToTick(seconds, beats) {
     if (!beats || beats.length < 2) return TICKS_PER_BEAT;
     if (seconds < beats[0].time) return TICKS_PER_BEAT;
@@ -382,6 +402,34 @@ function _tvTimeToTick(seconds, beats) {
     }
 
     return TICKS_PER_BEAT + Math.round((idx + frac) * TICKS_PER_BEAT);
+}
+
+// alphaTab 1.8.2 truncates each non-integral tuplet duration separately.
+// Accumulate the written fractions for our own cursor, rounding only each
+// resulting boundary. Keep its Beat objects untouched for bounds lookup.
+function _tvBuildRhythmTimeline(score) {
+    const out = [];
+    const bars = score?.tracks?.[0]?.staves?.[0]?.bars || [];
+    for (const bar of bars) {
+        const beats = bar.voices?.[0]?.beats || [];
+        const exact = beats.map(b => {
+            if (b.graceType !== 0 || !(b.duration > 0) || b.overrideDisplayDuration > 0) return NaN;
+            const numerator = b.tupletNumerator || 1, denominator = b.tupletDenominator || 1;
+            return 4 * TICKS_PER_BEAT / b.duration * (2 - Math.pow(2, -(b.dots || 0))) * denominator / numerator;
+        });
+        const useExact = Number.isFinite(bar.masterBar?.start) && exact.every(d => Number.isFinite(d) && d > 0)
+            && exact.some(d => Math.abs(d - Math.round(d)) > 1e-7);
+        let elapsed = 0;
+        for (let i = 0; i < beats.length; i++) {
+            const b = beats[i];
+            const start = useExact ? bar.masterBar.start + Math.round(elapsed)
+                : (typeof b.absoluteDisplayStart === 'number' ? b.absoluteDisplayStart : b.absolutePlaybackStart);
+            if (Number.isFinite(start)) out.push({beat:b, start});
+            elapsed += exact[i];
+        }
+    }
+    out.sort((a,b) => a.start - b.start);
+    return out;
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -683,7 +731,7 @@ function createFactory() {
 
     // ── alphaTab init ───────────────────────────────────────────────
 
-    async function _tvInitAlphaTab(arrayBuffer, myToken, harmonicMap, barMap, contactMap) {
+    async function _tvInitAlphaTab(arrayBuffer, myToken, harmonicMap, barMap, contactMap, rhythmMap) {
         const c = _tvCreateContainer();
         if (!c) return;
 
@@ -722,6 +770,7 @@ function createFactory() {
         const importSettings = new alphaTab.Settings();
         importSettings.fillFromJson(settings);
         const score = alphaTab.importer.ScoreLoader.loadScoreFromBytes(bytes, importSettings);
+        if (_tvApplyRhythmMap(score, rhythmMap)) score.finish(importSettings);
         if (harmonicMap) _tvApplyHarmonicMap(score, harmonicMap, alphaTab.model);
         if (barMap) _tvApplyWhammyMap(score, barMap, alphaTab.model);
         if(contactMap) {
@@ -861,7 +910,7 @@ function createFactory() {
             const resp = await fetch(url);
             if (_tvInitToken !== myToken) return;
             if (!resp.ok) throw new Error(await resp.text());
-            let data, harmonicMap, barMap, contactMap, sourceContinuations=[];
+            let data, harmonicMap, barMap, contactMap, rhythmMap, sourceContinuations=[];
             if ((resp.headers.get('content-type') || '').includes('application/json')) {
                 const bundle=await resp.json();
                 if (bundle.version!==1) throw new Error('Unsupported tab mapping version');
@@ -872,6 +921,7 @@ function createFactory() {
                 harmonicMap=bundle.harmonics;
                 barMap=bundle.whammy;
                 contactMap=bundle.harmonicContacts;
+                rhythmMap=bundle.rhythm;
                 sourceContinuations=bundle.sourceHarmonicContinuations || [];
             } else data=await resp.arrayBuffer();
             if (_tvInitToken !== myToken) return;
@@ -891,7 +941,7 @@ function createFactory() {
                 return;
             }
             _tvSizeContainer();
-            await _tvInitAlphaTab(data, myToken, harmonicMap, barMap, contactMap);
+            await _tvInitAlphaTab(data, myToken, harmonicMap, barMap, contactMap, rhythmMap);
             if (_tvInitToken === myToken && _tvAtMount?.parentElement) {
                 _tvAtMount.parentElement.querySelector('.tv-harmonic-detail')?.remove();
                 if(sourceContinuations.some(e=>e.rule!=='timed-artificial-contact') || contactMap?.limitations?.length) {
@@ -949,28 +999,10 @@ function createFactory() {
     // voice 0 carries the notes. Returns [] on any unexpected shape so the
     // marker simply stays hidden rather than throwing on the rAF path.
     function _tvBuildBeatTimeline(score) {
-        const out = [];
         try {
-            const track = score && score.tracks && score.tracks[0];
-            const staff = track && track.staves && track.staves[0];
-            const bars = staff && staff.bars;
-            if (!bars) return out;
-            for (let i = 0; i < bars.length; i++) {
-                const voices = bars[i].voices || [];
-                const voice = voices[0];
-                const beats = voice && voice.beats;
-                if (!beats) continue;
-                for (let j = 0; j < beats.length; j++) {
-                    const b = beats[j];
-                    const start = (typeof b.absoluteDisplayStart === 'number')
-                        ? b.absoluteDisplayStart
-                        : b.absolutePlaybackStart;
-                    if (typeof start === 'number') out.push({ beat: b, start: start });
-                }
-            }
+            return _tvBuildRhythmTimeline(score);
         } catch (_) { /* malformed score → empty timeline → marker hidden */ }
-        out.sort(function (a, b) { return a.start - b.start; });
-        return out;
+        return [];
     }
 
     // Greatest beat whose start <= tick (the beat currently sounding).
@@ -994,19 +1026,18 @@ function createFactory() {
         if (!_tvApi || !_tvReady) return;
 
         const tick = _tvTimeToTick(currentTime, _tvLatestBeats);
-        // Skip the (relatively expensive) beat lookup + marker reposition
-        // when the tick hasn't advanced — at 60fps × N splitscreen
-        // instances that's meaningful cost for state that doesn't change
-        // between frames. Resize-driven movement still re-places the
-        // marker via _onWinResize → _tvSizeContainer → _tvUpdateMarker.
-        if (Math.abs(tick - _tvLastTick) <= 30) return;
+        // A fixed 30-tick throttle can skip an entire short note or a paused
+        // seek. Only reposition the marker when the selected beat changes.
+        if (tick === _tvLastTick) return;
         _tvLastTick = tick;
         // _tvTimeToTick adds a one-beat baseline because rs2gp starts the
         // first measure at tick TICKS_PER_BEAT; alphaTab's
         // absoluteDisplayStart is 0-based, so subtract it back out before
         // looking the beat up. Floor at 0 for the very first beat.
         const lookupTick = Math.max(0, tick - TICKS_PER_BEAT);
-        _tvLastBeat = _tvFindBeatAtTick(lookupTick);
+        const beat = _tvFindBeatAtTick(lookupTick);
+        if (beat === _tvLastBeat) return;
+        _tvLastBeat = beat;
         _tvUpdateMarker();
     }
 

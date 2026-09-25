@@ -27,6 +27,7 @@ def setup(app: FastAPI, context: dict):
     get_sloppak_cache = context.get("get_sloppak_cache_dir")
 
     from rs2gp import arrangement_to_gp5
+    from rhythm import RhythmError
 
     def _song_to_gp5(song, arrangement: int, harmonics: bool = False, continuations=None) -> Response:
         if not song.arrangements:
@@ -102,6 +103,8 @@ def setup(app: FastAPI, context: dict):
                 "Only .feedpak / .sloppak songs are supported",
                 status_code=400,
             )
+        except RhythmError as e:
+            return Response(str(e), status_code=422)
         except Exception as e:
             import traceback
             traceback.print_exc()

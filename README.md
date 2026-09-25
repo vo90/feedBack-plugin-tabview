@@ -11,6 +11,17 @@ A [feedBack](https://github.com/got-feedback/feedback) plugin that renders custo
 - Preserves techniques: bends, slides, hammer-ons, pull-offs, harmonics, palm mutes, tremolo picking
 - Handles custom tunings and capo
 - Per-measure tempo changes
+- Adaptive display rhythm keeps closely spaced notes separate, including 64th/128th notes and supported tuplets
+
+The display export chooses a suitable rhythm for each measure. Ordinary
+32nd-note-grid passages keep their existing layout; denser or clearly tuplet
+passages use finer divisions. Split sustained durations use ties, preserving
+one attack. Notes are never merged merely because the display grid is too
+coarse. If GP5 cannot represent the spacing, Tab View reports the measure and
+keeps the highway available. This changes neither song data nor scoring.
+The display bundle also restores 128th-note values missed by the pinned
+alphaTab GP5 reader. Cursor timing accumulates tuplet durations before
+rounding, avoiding drift across a measure or skipped short-note seeks.
 
 ## Installation
 
