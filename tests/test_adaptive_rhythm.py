@@ -119,6 +119,30 @@ def test_split_duration_does_not_extend_an_ended_note():
     assert first[2].notes[0].value==9
 
 
+def test_dense_last_note_releases_before_the_following_rest():
+    song=song_at([F(i,32) for i in range(32)],step=F(1,32))
+    gp=export(song);q=F(0);sounding=[]
+    for beat in gp.tracks[0].measures[0].voices[0].beats:
+        end=q+F(beat.duration.time,960)
+        if beat.notes:sounding.append((q,end))
+        q=end
+    assert sounding[-1] == (F(31,32),F(1))
+    assert q == 4
+
+
+def test_adaptive_chord_releases_are_independent_without_new_attacks():
+    song=song_at([F(0),F(1,16),F(1)],step=F(1,16))
+    extra=deepcopy(song.arrangements[0].notes[1]);extra.string=1;extra.fret=12;extra.sustain=.25
+    song.arrangements[0].notes.append(extra)
+    gp=export(song);q=F(0);ends={}
+    for b in gp.tracks[0].measures[0].voices[0].beats:
+        q+=F(b.duration.time,960)
+        for n in b.notes:ends[(n.value,n.string)]=q
+    assert ends[(9,6)]==F(1,8)
+    assert ends[(12,5)]==F(9,16)
+    assert len(attacks(gp))==4
+
+
 def test_display_limit_is_reported_by_route_without_generic_server_failure(tmp_path,monkeypatch):
     import sys
     import routes

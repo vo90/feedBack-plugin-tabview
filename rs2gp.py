@@ -527,7 +527,8 @@ def _create_beats(events, m_info, voice, num_strings, remap=None, harmonic_notes
                     if label not in (beat.text or ""):
                         beat.text = ((beat.text or "") + "; " + label).strip("; ")
                 _apply_effects(note, nd)
-                sounding_until[id(note)] = ev['time'] + (nd.get('sustain') or 0)
+                sustain = nd.get('sustain') or 0
+                sounding_until[id(note)] = ev['time'] + sustain if sustain > 0 else None
                 if nd.get('display_tie'):note.type=guitarpro.NoteType.tie
                 if contact_notes is not None and nd.get('contact_source'):
                     contact_notes[id(note)]={**nd['contact_source'],'tie':bool(nd.get('display_tie'))}
@@ -545,28 +546,23 @@ def _create_beats(events, m_info, voice, num_strings, remap=None, harmonic_notes
                         'alias':nd.get('harmonic_alias') or None, 'ghost':bool(nd.get('ghost'))}
                 beat.notes.append(note)
 
+        if grid != SUBDIV:
+            beats.extend(_adaptive_gap(beat, pos, nxt, grid, m_info, sounding_until,
+                                       harmonic_notes, bar_notes, contact_notes))
+            cursor = nxt
+            continue
         if not beat.notes:beat.status=guitarpro.BeatStatus.rest
         beats.append(beat)
         cursor += duration_units(durations[0])
 
         for rd in durations[1:]:
-            owned=[n for n in beat.notes if (contact_notes is not None and id(n) in contact_notes)
-                   or (grid != SUBDIV and sounding_until[id(n)] >= rhythm.seconds((cursor + duration_units(rd)) / grid, m_info) - 1e-7)]
+            owned=[n for n in beat.notes if contact_notes is not None and id(n) in contact_notes]
             if owned:
                 tied=guitarpro.Beat(voice,status=guitarpro.BeatStatus.normal);tied.duration=rd
                 for original in owned:
                     note=guitarpro.Note(tied,value=original.value,string=original.string,type=guitarpro.NoteType.tie)
-                    # A split duration continues the note, without another HO/PO.
-                    if grid != SUBDIV:
-                        for effect in ('palmMute', 'vibrato', 'harmonic', 'ghostNote'):
-                            setattr(note.effect, effect, deepcopy(getattr(original.effect, effect)))
                     tied.notes.append(note)
-                    if contact_notes is not None and id(original) in contact_notes:
-                        contact_notes[id(note)]={**contact_notes[id(original)],'tie':True}
-                    if grid != SUBDIV and harmonic_notes is not None and id(original) in harmonic_notes:
-                        harmonic_notes[id(note)]=deepcopy(harmonic_notes[id(original)])
-                    if grid != SUBDIV and bar_notes is not None and id(original) in bar_notes:
-                        bar_notes[id(note)]=deepcopy(bar_notes[id(original)])
+                    contact_notes[id(note)]={**contact_notes[id(original)],'tie':True}
                 beats.append(tied)
             else:beats.extend(_rest_beats(duration_units(rd), voice, grid))
             cursor += duration_units(rd)
@@ -575,6 +571,48 @@ def _create_beats(events, m_info, voice, num_strings, remap=None, harmonic_notes
         beats.extend(_rest_beats(total - cursor, voice, grid))
 
     return beats
+
+
+def _adaptive_gap(beat, start, end, grid, measure, sounding_until, harmonic_notes, bar_notes, contact_notes):
+    """Fill one onset-to-onset interval without stretching notes over rests."""
+    releases = {}
+    for note in beat.notes:
+        until = sounding_until[id(note)]
+        if until is None or (contact_notes is not None and id(note) in contact_notes):
+            # A zero sustain has no explicit release. Contact boundaries are
+            # already supplied by display_events; retain their existing rule.
+            releases[id(note)] = end
+        else:
+            q, _ = rhythm.quarter(until, measure)
+            releases[id(note)] = max(start + 1, min(end, int(q * grid + .5)))
+    edges = sorted({start, end, *releases.values()})
+    result = []
+    cursor = start
+    for left, right in zip(edges, edges[1:]):
+        for duration in rhythm.durations(right - left, grid):
+            if cursor == start:
+                current = beat
+            else:
+                current = guitarpro.Beat(beat.voice, status=guitarpro.BeatStatus.normal)
+                for original in beat.notes:
+                    if releases[id(original)] <= cursor:
+                        continue
+                    note = guitarpro.Note(current, value=original.value, string=original.string,
+                                          type=guitarpro.NoteType.tie, velocity=original.velocity)
+                    for effect in ('palmMute', 'vibrato', 'harmonic', 'ghostNote'):
+                        setattr(note.effect, effect, deepcopy(getattr(original.effect, effect)))
+                    current.notes.append(note)
+                    for mapping in (harmonic_notes, bar_notes, contact_notes):
+                        if mapping is not None and id(original) in mapping:
+                            mapping[id(note)] = deepcopy(mapping[id(original)])
+                            if mapping is contact_notes:
+                                mapping[id(note)]['tie'] = True
+            current.duration = duration
+            if not current.notes:
+                current.status = guitarpro.BeatStatus.rest
+            result.append(current)
+            cursor += rhythm.units(duration, grid)
+    return result
 
 
 def _rest_beats(sixteenths, voice, grid=SUBDIV):
