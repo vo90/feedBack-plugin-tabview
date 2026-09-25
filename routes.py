@@ -2,6 +2,7 @@
 
 import sys
 import tempfile
+import json
 from pathlib import Path
 from fastapi import FastAPI
 from fastapi.responses import Response, JSONResponse
@@ -27,12 +28,13 @@ def setup(app: FastAPI, context: dict):
 
     from rs2gp import arrangement_to_gp5
 
-    def _song_to_gp5(song, arrangement: int, harmonics: bool = False) -> Response:
+    def _song_to_gp5(song, arrangement: int, harmonics: bool = False, continuations=None) -> Response:
         if not song.arrangements:
             return Response("No arrangements found", status_code=404)
         idx = max(0, min(arrangement, len(song.arrangements) - 1))
         gp5_bytes = arrangement_to_gp5(song, idx, include_harmonics=harmonics)
         if harmonics:
+            gp5_bytes['sourceHarmonicContinuations']=continuations or []
             return JSONResponse(gp5_bytes)
         return Response(
             content=gp5_bytes,
@@ -82,7 +84,18 @@ def setup(app: FastAPI, context: dict):
                 cache = Path(raw_cache) if raw_cache is not None else Path(tempfile.gettempdir()) / "sloppak_cache"
                 cache.mkdir(parents=True, exist_ok=True)
                 loaded = sloppak_mod.load_song(filename, Path(dlc), cache)
-                return _song_to_gp5(loaded.song, arrangement, harmonics)
+                continuations=[]
+                relative=loaded.manifest.get('song_import',{}).get('tiedHarmonicsFile')
+                if harmonics and isinstance(relative,str) and loaded.song.arrangements:
+                    evidence=(loaded.source_dir/relative).resolve()
+                    if not evidence.is_relative_to(loaded.source_dir.resolve()):
+                        raise ValueError('Harmonic evidence path is outside the song')
+                    if evidence.stat().st_size>8*1024*1024:raise ValueError('Harmonic evidence is too large')
+                    retained=json.loads(evidence.read_text(encoding='utf-8'))
+                    idx=max(0,min(arrangement,len(loaded.song.arrangements)-1))
+                    track=loaded.arrangement_ids[idx]
+                    continuations=[row for row in retained.get('continuations',[]) if row.get('trackId')==track]
+                return _song_to_gp5(loaded.song, arrangement, harmonics, continuations)
 
             # Any non-package input is unsupported.
             return Response(

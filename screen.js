@@ -683,7 +683,7 @@ function createFactory() {
 
     // ── alphaTab init ───────────────────────────────────────────────
 
-    async function _tvInitAlphaTab(arrayBuffer, myToken, harmonicMap, barMap) {
+    async function _tvInitAlphaTab(arrayBuffer, myToken, harmonicMap, barMap, contactMap) {
         const c = _tvCreateContainer();
         if (!c) return;
 
@@ -724,6 +724,15 @@ function createFactory() {
         const score = alphaTab.importer.ScoreLoader.loadScoreFromBytes(bytes, importSettings);
         if (harmonicMap) _tvApplyHarmonicMap(score, harmonicMap, alphaTab.model);
         if (barMap) _tvApplyWhammyMap(score, barMap, alphaTab.model);
+        if(contactMap) {
+            score.feedBackHarmonicContacts=contactMap;
+            for(const e of contactMap.notes || []) {
+                const beat=score.tracks[e.track]?.staves[e.staff]?.bars[e.bar]?.voices[e.voice]?.beats[e.beat];
+                const n=beat?.notes.find(n=>n.string===e.string);
+                if(!n || n.fret!==e.fret || !!n.isTieDestination!==e.tie)throw new Error('Harmonic contact display mapping mismatch');
+                n.feedBackHarmonicContact=e;
+            }
+        }
         if (barMap?.beats.some(b=>b.points.length)) {
             _tvConfigureBarGlyphs(alphaTab);
             settings.core.useWorkers = false;
@@ -852,7 +861,7 @@ function createFactory() {
             const resp = await fetch(url);
             if (_tvInitToken !== myToken) return;
             if (!resp.ok) throw new Error(await resp.text());
-            let data, harmonicMap, barMap;
+            let data, harmonicMap, barMap, contactMap, sourceContinuations=[];
             if ((resp.headers.get('content-type') || '').includes('application/json')) {
                 const bundle=await resp.json();
                 if (bundle.version!==1) throw new Error('Unsupported tab mapping version');
@@ -862,6 +871,8 @@ function createFactory() {
                 if (digest!==bundle.sha256) throw new Error('Tab mapping integrity check failed');
                 harmonicMap=bundle.harmonics;
                 barMap=bundle.whammy;
+                contactMap=bundle.harmonicContacts;
+                sourceContinuations=bundle.sourceHarmonicContinuations || [];
             } else data=await resp.arrayBuffer();
             if (_tvInitToken !== myToken) return;
 
@@ -880,7 +891,18 @@ function createFactory() {
                 return;
             }
             _tvSizeContainer();
-            await _tvInitAlphaTab(data, myToken, harmonicMap, barMap);
+            await _tvInitAlphaTab(data, myToken, harmonicMap, barMap, contactMap);
+            if (_tvInitToken === myToken && _tvAtMount?.parentElement) {
+                _tvAtMount.parentElement.querySelector('.tv-harmonic-detail')?.remove();
+                if(sourceContinuations.some(e=>e.rule!=='timed-artificial-contact') || contactMap?.limitations?.length) {
+                    const detail=document.createElement('p');detail.className='tv-harmonic-detail';
+                    detail.style.cssText='font-size:12px;color:#aab8c8;padding:8px 12px;margin:0';
+                    detail.textContent=sourceContinuations.some(e=>e.rule!=='timed-artificial-contact')
+                        ? 'Some harmonic changes inside ties are not shown in this gameplay tab. Their original annotations are preserved with the song.'
+                        : 'Harmonic contacts are shown as tied notes. This tab view rounds their spacing; the highway keeps the exact timing.';
+                    _tvAtMount.before(detail);
+                }
+            }
 
             if (_tvInitToken !== myToken) return;
             _tvCurrentFile = filename;

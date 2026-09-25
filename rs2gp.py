@@ -5,6 +5,7 @@ import base64
 import hashlib
 import guitarpro
 from whammy_map import build_mapping
+from harmonic_contacts import display_events, build_mapping as contact_mapping
 from song import arrangement_string_count
 
 TICKS_PER_BEAT = 960
@@ -54,7 +55,7 @@ def arrangement_to_gp5(song, arrangement_index=0, include_harmonics=False):
     if not measures_info:
         measures_info = [_fallback_measure(song.song_length)]
 
-    events = _merge_events(arr)
+    events = display_events(_merge_events(arr),measures_info)
 
     # --- GP3/4/5 hard limit: writeTrack only writes 7 tuning slots, and
     # writeNotes packs note strings into an 8-bit stringFlags byte via
@@ -106,6 +107,7 @@ def arrangement_to_gp5(song, arrangement_index=0, include_harmonics=False):
     prev_bpm = gp.tempo
     harmonic_notes = {}
     bar_notes = {}
+    contact_notes = {}
 
     for i, m_info in enumerate(measures_info):
         header = guitarpro.MeasureHeader(number=i + 1, start=tick)
@@ -122,7 +124,7 @@ def arrangement_to_gp5(song, arrangement_index=0, include_harmonics=False):
 
         measure = guitarpro.Measure(track, header)
         voice = measure.voices[0]
-        voice.beats = _create_beats(m_events, m_info, voice, num_strings, remap, harmonic_notes, bar_notes)
+        voice.beats = _create_beats(m_events, m_info, voice, num_strings, remap, harmonic_notes, bar_notes, contact_notes)
 
         # Tempo change via MixTableChange on the first beat
         cur_bpm = max(30, min(300, round(m_info["bpm"])))
@@ -157,7 +159,8 @@ def arrangement_to_gp5(song, arrangement_index=0, include_harmonics=False):
                             gpString=note.string, fret=note.value, **evidence))
     return {"version":1, "gp5":base64.b64encode(data).decode('ascii'),
             "sha256":hashlib.sha256(data).hexdigest(), "harmonics":mapping,
-            "whammy":build_mapping(track,measures_info,bar_notes)}
+            "whammy":build_mapping(track,measures_info,bar_notes),
+            "harmonicContacts":contact_mapping(track,contact_notes)}
 
 
 # ---------------------------------------------------------------------------
@@ -237,6 +240,7 @@ _NOTE_FIELDS = [
     "harmonic",
     "harmonic_pinch",
     "harmonic_target",
+    "harmonic_changes",
     "whammy",
     "harmonic_node",
     "harmonic_pitch",
@@ -433,7 +437,7 @@ def _dur_sixteenths(d):
     return max(v, 1)
 
 
-def _create_beats(events, m_info, voice, num_strings, remap=None, harmonic_notes=None, bar_notes=None):
+def _create_beats(events, m_info, voice, num_strings, remap=None, harmonic_notes=None, bar_notes=None, contact_notes=None):
     """Build GP Beat list for one measure."""
     total = m_info["num_beats"] * SUBDIV
 
@@ -465,7 +469,7 @@ def _create_beats(events, m_info, voice, num_strings, remap=None, harmonic_notes
         seen = set()
         for ev in slots[pos]:
             note_dicts = (
-                ev.get("chord_notes", []) if ev["type"] == "chord" else [ev]
+                ev.get("chord_notes", []) if ev["type"] == "chord" else [] if ev["type"] == "boundary" else [ev]
             )
             for nd in note_dicts:
                 if remap is not None:
@@ -503,6 +507,12 @@ def _create_beats(events, m_info, voice, num_strings, remap=None, harmonic_notes
                     if label not in (beat.text or ""):
                         beat.text = ((beat.text or "") + "; " + label).strip("; ")
                 _apply_effects(note, nd)
+                if nd.get('display_tie'):note.type=guitarpro.NoteType.tie
+                if contact_notes is not None and nd.get('contact_source'):
+                    contact_notes[id(note)]={**nd['contact_source'],'tie':bool(nd.get('display_tie'))}
+                    if nd.get('display_tie') and ev['time']>=nd['contact_source']['onset']+nd['contact_source']['event']['start']:
+                        h=nd['contact_source']['event']['target']
+                        beat.text=((beat.text or '')+f" AH {nd['fret']+h['node']:g}").strip()
                 if bar_notes is not None and nd.get('whammy'):
                     bar_notes[id(note)]={'sourceId':nd['source_id'],'time':ev['time'],
                         'sustain':nd['sustain'],'expression':nd['whammy']}
@@ -514,11 +524,20 @@ def _create_beats(events, m_info, voice, num_strings, remap=None, harmonic_notes
                         'alias':nd.get('harmonic_alias') or None, 'ghost':bool(nd.get('ghost'))}
                 beat.notes.append(note)
 
+        if not beat.notes:beat.status=guitarpro.BeatStatus.rest
         beats.append(beat)
         cursor += _dur_sixteenths(durations[0])
 
         for rd in durations[1:]:
-            beats.extend(_rest_beats(_dur_sixteenths(rd), voice))
+            owned=[n for n in beat.notes if contact_notes is not None and id(n) in contact_notes]
+            if owned:
+                tied=guitarpro.Beat(voice,status=guitarpro.BeatStatus.normal);tied.duration=rd
+                for original in owned:
+                    note=guitarpro.Note(tied,value=original.value,string=original.string,type=guitarpro.NoteType.tie)
+                    tied.notes.append(note)
+                    contact_notes[id(note)]={**contact_notes[id(original)],'tie':True}
+                beats.append(tied)
+            else:beats.extend(_rest_beats(_dur_sixteenths(rd), voice))
             cursor += _dur_sixteenths(rd)
 
     if cursor < total:
