@@ -180,12 +180,17 @@ function _tvConfigureBarGlyphs(library) {
         effect.createNewGlyph=function(renderer,beat) {
             const glyph=create.call(this,renderer,beat);
             if(!beat.feedBackWhammy || !beat.hasWhammyBar)return glyph;
-            if(typeof glyph._paintWhammy!=='function' || !Array.isArray(glyph._renderPoints))
+            // Both published 1.8.2 bundles are covered by the pinned-model
+            // tests. Its optimized bundle renames these private members.
+            const pointKey=Array.isArray(glyph._renderPoints)?'_renderPoints':'QS';
+            const offsetKey=typeof glyph._getOffset==='function'?'_getOffset':'mB';
+            const paintKey=typeof glyph._paintWhammy==='function'?'_paintWhammy':'gB';
+            if(typeof glyph[paintKey]!=='function' || typeof glyph[offsetKey]!=='function' || !Array.isArray(glyph[pointKey]))
                 throw new Error('Unsupported tablature bar glyph');
             // Rendering-only simplification of collinear samples prevents a
             // label on every interpolated metrical boundary. Turns/resets stay.
             const points=[];
-            for(const p of glyph._renderPoints) {
+            for(const p of glyph[pointKey]) {
                 while(points.length>1) {
                     const a=points[points.length-2],b=points[points.length-1];
                     if(b.offset<=a.offset || p.offset<=b.offset ||
@@ -194,30 +199,40 @@ function _tvConfigureBarGlyphs(library) {
                 }
                 points.push(p);
             }
-            glyph._renderPoints=points;
+            glyph[pointKey]=points;
             // Pinned alphaTab skips height reservation for Custom curves and
             // its log(abs(value)) offset can reverse very small pitch changes.
             // Reserve the actual signed envelope without altering pitch data.
-            glyph._getOffset=function(value) {
+            glyph[offsetKey]=function(value) {
                 return Math.sign(value)*this.renderer.smuflMetrics.tabWhammyPerHalfHeight*Math.log2(1+Math.abs(value));
             };
             glyph.doLayout=function() {
                 const canvas=this.renderer.scoreRenderer.canvas;
                 canvas.font=this.renderer.resources.tablatureFont;
                 const pad=canvas.measureText('−8').height+this.renderer.smuflMetrics.tabWhammyTextPadding;
-                const offsets=this._renderPoints.map(p=>this._getOffset(p.value));
-                this.topOffset=this.originalTopOffset=Math.max(0,...offsets)+pad;
+                const offsets=this[pointKey].map(p=>this[offsetKey](p.value));
+                this.topOffset=this.originalTopOffset=Math.max(0,...offsets)+pad*Math.max(1,points.length);
                 this.bottomOffset=this.originalBottomOffset=Math.max(0,...offsets.map(v=>-v));
                 this.height=this.topOffset+this.bottomOffset;this.width=0;
             };
-            const paint=glyph._paintWhammy;
-            glyph._paintWhammy=function(isFirst,first,second,cx,cy,dx,canvas,slurText) {
+            const paint=glyph[paintKey];
+            const paintGlyph=glyph.paint;
+            glyph.paint=function(...args) {
+                this._feedBackBarLabels=[];
+                return paintGlyph.apply(this,args);
+            };
+            glyph[paintKey]=function(isFirst,first,second,cx,cy,dx,canvas,slurText) {
                 // Scope formatting to this glyph call. No global canvas,
                 // alphaTab prototype, model value or ordinary bend is patched.
                 const targetX=cx+dx*second.offset;
+                const labels=this._feedBackBarLabels || (this._feedBackBarLabels=[]);
                 const formatted=new Proxy(canvas,{get(target,key){
-                    if(key==='fillText')return (text,x,y)=>target.fillText(
-                        x===targetX && text!==slurText ? _tvBarPitchLabel(second.value) : text,x,y);
+                    if(key==='fillText')return (text,x,y)=>{
+                        const label=x===targetX && text!==slurText ? _tvBarPitchLabel(second.value) : text;
+                        const size=target.measureText(label), gap=size.height+2;
+                        while(labels.some(r=>Math.abs(r.x-x)<(r.width+size.width)/2+2 && Math.abs(r.y-y)<gap))y-=gap;
+                        labels.push({x,y,width:size.width});target.fillText(label,x,y);
+                    };
                     const value=Reflect.get(target,key,target);
                     return typeof value==='function'?value.bind(target):value;
                 }});

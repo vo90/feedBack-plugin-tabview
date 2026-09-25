@@ -20,16 +20,19 @@ function beat(mapped=true) {
  if(mapped)b.feedBackWhammy={version:1};return b;
 }
 const b=beat(),original=b.whammyBarPoints.map(p=>[p.offset,p.value]),g=effect.createNewGlyph(null,b);
-assert.equal(g._renderPoints.length,2);assert.deepEqual(b.whammyBarPoints.map(p=>[p.offset,p.value]),original);
-assert.equal(Object.hasOwn(effect.createNewGlyph(null,beat(false)),'_getOffset'),false,'Ordinary GP curves keep upstream behavior');
-const text=[],lines=[],canvas={font:null,measureText:()=>({height:12}),fillText:(s,x,y)=>text.push({s,x,y}),
+const pointKey=Array.isArray(g._renderPoints)?'_renderPoints':'QS',offsetKey=typeof g._getOffset==='function'?'_getOffset':'mB',paintKey=typeof g._paintWhammy==='function'?'_paintWhammy':'gB';
+assert.equal(g[pointKey].length,2);assert.deepEqual(b.whammyBarPoints.map(p=>[p.offset,p.value]),original);
+assert.equal(Object.hasOwn(effect.createNewGlyph(null,beat(false)),offsetKey),false,'Ordinary GP curves keep upstream behavior');
+const text=[],lines=[],canvas={font:null,measureText:s=>({height:12,width:s.length*7}),fillText:(s,x,y)=>text.push({s,x,y}),
  moveTo:(x,y)=>lines.push([x,y]),lineTo:(x,y)=>lines.push([x,y]),stroke(){}};
 g.renderer={scoreRenderer:{canvas},resources:{tablatureFont:{}},smuflMetrics:{tabWhammyPerHalfHeight:8,tabWhammyTextPadding:3,tabWhammyDashSize:2},
  settings:{notation:{isNotationElementVisible:()=>false}}};
-g.doLayout();assert.ok(g.height>15);assert.ok(g._getOffset(.2)>0);assert.ok(g._getOffset(-.2)<0);
-g._paintWhammy(true,new a.model.BendPoint(0,0),new a.model.BendPoint(60,4/3),0,50,1,canvas,'grad.');
+g.doLayout();assert.ok(g.height>15);assert.ok(g[offsetKey](.2)>0);assert.ok(g[offsetKey](-.2)<0);
+g[paintKey](true,new a.model.BendPoint(0,0),new a.model.BendPoint(60,4/3),0,50,1,canvas,'grad.');
 assert.deepEqual(text.map(t=>t.s),['grad.','≈0.33']);assert.ok(lines.flat().every(Number.isFinite));
-assert.equal(lines.at(-1)[1],50-g._getOffset(4/3),'Unrounded curve geometry');
+assert.equal(lines.at(-1)[1],50-g[offsetKey](4/3),'Unrounded curve geometry');
+g[paintKey](false,new a.model.BendPoint(59,1),new a.model.BendPoint(60,1.34),0,50,1,canvas,'');
+assert.ok(Math.abs(text.at(-1).y-text.at(-2).y)>=14,'Close depth labels get separate reserved rows');
 assert.equal(Object.hasOwn(canvas,'fillText'),true);assert.equal(canvas.fillText.toString().includes('text.push'),true);
 assert.deepEqual(b.whammyBarPoints.map(p=>[p.offset,p.value]),original);
 assert.throws(()=>configure({...a,Environment:{defaultRenderers:[]}}),/Unsupported tablature bar layout/);
