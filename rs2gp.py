@@ -270,6 +270,7 @@ _NOTE_FIELDS = [
     "accent",
     "tap",
     "pick_scrape_marks",
+    "slide_out_marks",
 ]
 
 
@@ -535,6 +536,22 @@ def _create_beats(events, m_info, voice, num_strings, remap=None, harmonic_notes
                     if label not in (beat.text or ""):
                         beat.text = ((beat.text or "") + "; " + label).strip("; ")
                 _apply_effects(note, nd)
+                if nd.get('mute') and nd['fret'] == 127 and not scrape:
+                    marks = nd.get('slide_out_marks')
+                    if isinstance(marks, list) and marks:
+                        directions = [m.get('direction') for m in marks if isinstance(m, dict)]
+                        if len(directions) == len(marks) and all(d in ('up', 'down') for d in directions):
+                            if len(set(directions)) == 1:
+                                note.effect.slides = [guitarpro.SlideType.outUpwards if directions[0] == 'up'
+                                                      else guitarpro.SlideType.outDownwards]
+                            else:
+                                # GP5 has no timed sequence of slide-out directions.
+                                # Keep a textual sequence on the X, never invent
+                                # additional played notes or a numbered endpoint.
+                                label = 'MUTED SLIDE ' + ' then '.join(directions)
+                                if label not in (beat.text or ''):
+                                    beat.text = ((beat.text or '') + '; ' + label).strip('; ')
+
                 sustain = nd.get('sustain') or 0
                 performed_time = nd.get('performed_time', ev['time'])
                 sounding_until[id(note)] = performed_time + sustain if sustain > 0 else None
