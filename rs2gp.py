@@ -36,7 +36,7 @@ BASS_STANDARD = {
 }
 
 
-def arrangement_to_gp5(song, arrangement_index=0, include_harmonics=False):
+def arrangement_to_gp5(song, arrangement_index=0, include_harmonics=False, strum_context=None):
     """Convert a Song arrangement to GP5 bytes."""
     arr = song.arrangements[arrangement_index]
 
@@ -57,7 +57,8 @@ def arrangement_to_gp5(song, arrangement_index=0, include_harmonics=False):
     if not measures_info:
         measures_info = [_fallback_measure(song.song_length)]
 
-    events = display_events(_merge_events(arr),measures_info)
+    from strums import display_events as group_strums
+    events = display_events(group_strums(_merge_events(arr), strum_context),measures_info)
 
     # --- GP3/4/5 hard limit: writeTrack only writes 7 tuning slots, and
     # writeNotes packs note strings into an 8-bit stringFlags byte via
@@ -484,6 +485,13 @@ def _create_beats(events, m_info, voice, num_strings, remap=None, harmonic_notes
 
         beat = guitarpro.Beat(voice, status=guitarpro.BeatStatus.normal)
         beat.duration = durations[0]
+        directions = {ev['authored_strum'] for ev in slots[pos] if ev.get('authored_strum')}
+        if len(directions) > 1:
+            raise rhythm.RhythmError('Conflicting authored strum directions at one display beat.')
+        if directions:
+            direction = directions.pop()
+            beat.effect.stroke = guitarpro.BeatStroke(
+                direction=getattr(guitarpro.BeatStrokeDirection, direction), value=32)
 
         seen = set()
         sounding_until = {}
@@ -528,7 +536,8 @@ def _create_beats(events, m_info, voice, num_strings, remap=None, harmonic_notes
                         beat.text = ((beat.text or "") + "; " + label).strip("; ")
                 _apply_effects(note, nd)
                 sustain = nd.get('sustain') or 0
-                sounding_until[id(note)] = ev['time'] + sustain if sustain > 0 else None
+                performed_time = nd.get('performed_time', ev['time'])
+                sounding_until[id(note)] = performed_time + sustain if sustain > 0 else None
                 if nd.get('display_tie'):note.type=guitarpro.NoteType.tie
                 if contact_notes is not None and nd.get('contact_source'):
                     contact_notes[id(note)]={**nd['contact_source'],'tie':bool(nd.get('display_tie'))}
@@ -536,7 +545,7 @@ def _create_beats(events, m_info, voice, num_strings, remap=None, harmonic_notes
                         h=nd['contact_source']['event']['target']
                         beat.text=((beat.text or '')+f" AH {nd['fret']+h['node']:g}").strip()
                 if bar_notes is not None and nd.get('whammy'):
-                    bar_notes[id(note)]={'sourceId':nd['source_id'],'time':ev['time'],
+                    bar_notes[id(note)]={'sourceId':nd['source_id'],'time':performed_time,
                         'sustain':nd['sustain'],'expression':nd['whammy']}
                 if harmonic_notes is not None and (nd.get('harmonic_target') or nd.get('harmonic_node')):
                     harmonic_notes[id(note)] = {

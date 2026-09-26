@@ -68,3 +68,13 @@ interpolated depths compactly (whole-tone units; `≈` marks rounded display tex
 Only collinear rendering samples are omitted. Notes, model points, source values
 and normal GP bends remain unchanged. These charts use the local renderer so
 the scoped formatting also applies when workers are otherwise enabled.
+
+Songsterr strummed chords use `song_import.strumsFile` when FeedForge includes
+the source-bound display groups (preservation contract 26). TabView validates
+the original source hash and authored direction, then matches every group member
+by string, fret and exact mapped onset before drawing one chord and its stroke
+mark. Original gameplay attacks, scoring, durations and pitch curves stay intact.
+Repeated/shifted strokes and tempo mapping use the retained performed times.
+Missing or ambiguous members are not guessed or combined into partial chords.
+Older imports without these groups keep their existing display behavior; import
+again with the updated FeedForge to add the metadata.
