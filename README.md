@@ -78,3 +78,8 @@ Repeated/shifted strokes and tempo mapping use the retained performed times.
 Missing or ambiguous members are not guessed or combined into partial chords.
 Older imports without these groups keep their existing display behavior; import
 again with the updated FeedForge to add the metadata.
+
+FeedForge contract 27 can separate conflicting Songsterr voices into selectable
+arrangements. Their strum groups retain the original source beat identity and use
+`song_import.voicesFile` to bind each derived arrangement to its original track
+and voice. TabView checks that mapping and source hash before drawing the stroke.

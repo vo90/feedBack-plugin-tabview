@@ -72,3 +72,20 @@ def test_repeated_occurrences_remain_separate_groups():
     for n in other['notes']:n['t']+=2
     actual=strums.display_events(events+later,groups+[other])
     assert [e['time'] for e in actual]==[0,2] and all(len(e['chord_notes'])==6 for e in actual)
+
+
+def test_derived_voice_strum_uses_original_track_and_rejects_wrong_voice(tmp_path):
+    _,groups=fixture();ident='voice-'+hashlib.sha256(b'0').hexdigest()[:20]+'-1'
+    groups[0]['trackId']=ident
+    source={'tracks':[{'id':0}],'parts':[{'measures':[{'voices':[{'beats':[{'brushStroke':{'direction':'down'}}]}]}]}]}
+    raw=json.dumps(source).encode();digest=hashlib.sha256(raw).hexdigest();(tmp_path/'source.json').write_bytes(raw)
+    projection={'version':1,'policy':'source-voices-v1','timeDomain':'score_seconds','sourceSha256':digest,'tracks':[
+        {'sourceTrackId':'0','mode':'split','arrangements':[{'id':ident,'voices':[0]}]}]}
+    (tmp_path/'voices.json').write_text(json.dumps(projection),encoding='utf-8')
+    (tmp_path/'strums.json').write_text(json.dumps({'version':1,'timeDomain':'recording_seconds','sourceSha256':digest,'groups':groups}),encoding='utf-8')
+    loaded=Obj(source_dir=tmp_path,arrangement_ids=[ident],manifest={'song_import':{'source':'songsterr','sourceFile':'source.json',
+        'scoreHash':digest,'strumsFile':'strums.json','voicesFile':'voices.json'}})
+    assert strums.load_context(loaded,0)==groups
+    projection['tracks'][0]['arrangements'][0]['voices']=[1]
+    (tmp_path/'voices.json').write_text(json.dumps(projection),encoding='utf-8')
+    with pytest.raises(ValueError,match='voice'):strums.load_context(loaded,0)

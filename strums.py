@@ -31,13 +31,34 @@ def load_context(loaded, index):
     source = json.loads(data)
     groups = receipt.get('groups')
     if not isinstance(groups,list) or len(groups)>100000: raise ValueError('Invalid strum groups')
+    projection = None
+    if recipe.get('voicesFile'):
+        projection = json.loads(_read(loaded,recipe['voicesFile']))
+        if (projection.get('version')!=1 or projection.get('policy')!='source-voices-v1'
+                or projection.get('timeDomain')!='score_seconds'
+                or projection.get('sourceSha256')!=digest):
+            raise ValueError('Voice projection does not match the retained source')
     selected=[]
     for group in groups:
         if group['trackId'] != loaded.arrangement_ids[index]: continue
         match=BEAT_ID.fullmatch(group['sourceId'])
         if not match: raise ValueError('Invalid strum source identity')
         pi,mi,vi,bi=map(int,match.groups())
-        if str(source['tracks'][pi].get('id',pi)) != group['trackId']:
+        original_id = str(source['tracks'][pi].get('id',pi))
+        if projection is not None:
+            matches=[(row,arr) for row in projection['tracks'] for arr in row['arrangements']
+                     if arr['id']==group['trackId']]
+            if matches:
+                if len(matches)!=1:raise ValueError('Ambiguous voice arrangement identity')
+                row,arr=matches[0]
+                if row['mode'] not in ('split','combined'):raise ValueError('Invalid voice projection mode')
+                expected_id=(('voice-'+hashlib.sha256(row['sourceTrackId'].encode()).hexdigest()[:20]+'-'+str(vi+1))
+                             if row['mode']=='split' else row['sourceTrackId'])
+                if (row['sourceTrackId']!=original_id or vi not in arr['voices']
+                        or expected_id!=group['trackId']):
+                    raise ValueError('Strum belongs to another source voice')
+                original_id=group['trackId']
+        if original_id != group['trackId']:
             raise ValueError('Strum belongs to another source track')
         raw=source['parts'][pi]['measures'][mi]['voices'][vi]['beats'][bi]
         directions=[]
