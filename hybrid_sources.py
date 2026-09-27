@@ -15,13 +15,15 @@ def load_lineage(loaded, index):
     entry = next((a for a in entries if a.get('id') == ident), {})
     if not entry.get('derived'):
         return None
+    policy = entry['derived'].get('kind')
+    version = {'hybrid-lead-v1': 1, 'hybrid-lead-v2': 2}.get(policy)
     from strums import _read
-    if (entry['derived'] != {'kind': 'hybrid-lead-v1', 'receipt': 'import/hybrid-lead.json'}
-            or recipe.get('hybridLeadFile') != 'import/hybrid-lead.json' or recipe.get('preservationContract', 0) < 32):
+    if (not version or entry['derived'] != {'kind': policy, 'receipt': 'import/hybrid-lead.json'}
+            or recipe.get('hybridLeadFile') != 'import/hybrid-lead.json' or recipe.get('preservationContract', 0) < 31 + (version or 0)):
         raise ValueError('Unsupported derived arrangement identity')
     receipt = json.loads(_read(loaded, recipe['hybridLeadFile']))
     digest = hashlib.sha256(_read(loaded, recipe.get('sourceFile'))).hexdigest()
-    if (receipt.get('version') != 1 or receipt.get('policy') != 'hybrid-lead-v1'
+    if (receipt.get('version') != version or receipt.get('policy') != policy
             or receipt.get('arrangementId') != ident or receipt.get('sourceSha256') != digest
             or recipe.get('scoreHash') != digest or receipt.get('options') != recipe.get('hybridLead')
             or receipt.get('audioSha256') != recipe.get('audioHash')):
@@ -45,6 +47,19 @@ def load_lineage(loaded, index):
     expected['name'] = 'Hybrid Lead'
     expected.pop('phrases', None)
     expected.pop('ext', None)
+    if version == 2:
+        if recipe['hybridLead'].get('policy') != policy or receipt.get('coverage', {}).get('status') != 'complete':
+            raise ValueError('Hybrid Lead lacks verified primary coverage')
+        refs = receipt.get('mainEvents', [])
+        if any(r.get('kind') not in ('notes','chords') or not r.get('sourceIds') or not r.get('occurrences') for r in refs):
+            raise ValueError('Invalid Hybrid Lead main lineage')
+        if len({(r['kind'],r['index']) for r in refs}) != len(refs):
+            raise ValueError('Duplicate Hybrid Lead main event')
+        for kind in ('notes', 'chords'):
+            indices = {r['index'] for r in refs if r['kind'] == kind}
+            if any(type(i) is not int or i < 0 or i >= len(expected[kind]) for i in indices):
+                raise ValueError('Invalid Hybrid Lead main event')
+            expected[kind] = [e for i,e in enumerate(expected[kind]) if i in indices]
     offsets, used = {main_id: 0}, set()
     previous = None
     for passage in receipt.get('passages', []):
@@ -74,6 +89,13 @@ def load_lineage(loaded, index):
             expected[ref['kind']].append(event)
     for kind in ('notes', 'chords'):
         expected[kind].sort(key=lambda e: e['t'])
+    if version == 2:
+        used_templates = {c['id'] for c in expected['chords']}
+        kept = [i for i,t in enumerate(expected['templates']) if i in used_templates or 127 not in t['frets']]
+        ids = {old:new for new,old in enumerate(kept)}
+        expected['templates'] = [expected['templates'][i] for i in kept]
+        for chord in expected['chords']:
+            chord['id'] = ids[chord['id']]
     actual = {k: v for k, v in json.loads(raw).items() if k not in ('phrases', 'ext')}
     if expected != actual:
         raise ValueError('Hybrid Lead does not copy its declared original events')
@@ -82,7 +104,12 @@ def load_lineage(loaded, index):
 
 def includes(receipt, group, *, recording_time=False):
     if group.get('trackId') == receipt['mainTrackId']:
-        return True
+        if receipt.get('version') == 1:
+            return True
+        source_id = group.get('sourceId', '')
+        return any(group.get('occurrence') in r['occurrences'] and any(
+            sid == source_id or recording_time and sid.startswith(source_id + ':') for sid in r['sourceIds'])
+            for r in receipt.get('mainEvents', []))
     for passage in receipt['passages']:
         if passage['trackId'] != group.get('trackId'):
             continue

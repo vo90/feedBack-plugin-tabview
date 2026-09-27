@@ -68,3 +68,30 @@ def test_tampered_or_partial_projection_is_rejected(tmp_path, fault):
         write('strums.json', {'version': 1, 'timeDomain': 'recording_seconds', 'sourceSha256': receipt['sourceSha256'], 'groups': [group]})
     write('import/hybrid-lead.json', receipt)
     with pytest.raises(ValueError): strums.load_context(loaded, 2)
+
+
+def test_v2_projects_only_retained_main_strums_and_harmonic_occurrences(tmp_path):
+    loaded,receipt,group,write = fixture(tmp_path)
+    options = {**receipt['options'],'policy':'hybrid-lead-v2'}
+    receipt.update(version=2,policy='hybrid-lead-v2',options=options,coverage={'status':'complete'},
+                   mainEvents=[{'kind':'notes','index':0,'sourceIds':['songsterr:0:0:0:0:0'],'occurrences':[1]}])
+    loaded.manifest['song_import'].update(preservationContract=33,hybridLead=options)
+    loaded.manifest['arrangements'][-1]['derived']['kind']='hybrid-lead-v2'
+    write('import/hybrid-lead.json',receipt)
+    assert load_lineage(loaded,2)==receipt
+    main={'trackId':'0','sourceId':'songsterr:0:0:0:0','occurrence':1}
+    assert includes(receipt,main,recording_time=True)
+    assert includes(receipt,{**main,'sourceId':'songsterr:0:0:0:0:0'})
+    assert not includes(receipt,{**main,'occurrence':2},recording_time=True)
+    assert not includes(receipt,{**main,'sourceId':'songsterr:0:1:0:0'},recording_time=True)
+    assert strums.load_context(loaded,2)==[group]
+    chart=json.loads((tmp_path/'hybrid.json').read_text())
+    chart['notes']=chart['notes'][1:]
+    receipt['mainEvents']=[]
+    receipt['chartSha256']=write('hybrid.json',chart)
+    write('import/hybrid-lead.json',receipt)
+    assert load_lineage(loaded,2)==receipt
+    assert not includes(receipt,main,recording_time=True)
+    receipt['mainEvents']=[{'kind':'notes','index':99,'sourceIds':['x'],'occurrences':[1]}]
+    write('import/hybrid-lead.json',receipt)
+    with pytest.raises(ValueError): load_lineage(loaded,2)
