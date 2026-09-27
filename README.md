@@ -68,6 +68,11 @@ interpolated depths compactly (whole-tone units; `≈` marks rounded display tex
 Only collinear rendering samples are omitted. Notes, model points, source values
 and normal GP bends remain unchanged. These charts use the local renderer so
 the scoped formatting also applies when workers are otherwise enabled.
+When adaptive rhythm splits a sustain into tied display notes, each segment
+retains the same bar expression. TabView checks the connected tie chain and
+source identity before applying any mapping. An invalid display falls back to
+the built-in highway, including failures after the first tab render, with a
+brief error notice. Reselect Tab View to try again.
 
 Songsterr strummed chords use `song_import.strumsFile` when FeedForge includes
 the source-bound display groups (preservation contract 26). TabView validates

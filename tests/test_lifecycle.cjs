@@ -1,0 +1,65 @@
+const {test}=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),vm=require('node:vm');
+const code=fs.readFileSync(path.join(__dirname,'../screen.js'),'utf8');
+const tick=()=>new Promise(resolve=>setImmediate(resolve));
+function harness(){
+ function element(){return {style:{visibility:''},dataset:{},children:[],clientHeight:800,
+  appendChild(e){e.parentElement=this;this.children.push(e);},setAttribute(){},querySelector(){return null;},
+  remove(){if(this.parentElement)this.parentElement.children=this.parentElement.children.filter(e=>e!==this);},
+  scrollTo(){}};}
+ const player=element(),canvases=[element(),element()],panels=[element(),element()],apis=[],visibility=[],timers=new Map();
+ const event=()=>({on(fn){this.fn=fn;},emit(value){this.fn?.(value);}});
+ const alphaTab={Settings:class {fillFromJson(){}},LayoutMode:{Page:0},
+  importer:{ScoreLoader:{loadScoreFromBytes(){return {tracks:[]};}}},
+  AlphaTabApi:class {
+   constructor(){this.scoreLoaded=event();this.renderFinished=event();this.error=event();apis.push(this);}
+   load(){} destroy(){this.destroyed=true;}
+  }};
+ let fetcher=async()=>({ok:true,headers:{get:()=>''},arrayBuffer:async()=>new ArrayBuffer(0)}),timerId=0;
+ const sandbox={console:{warn(){},error(){},log(){}},alphaTab,document:{getElementById:id=>id==='player'?player:null,createElement:element},
+  fetch:(...args)=>fetcher(...args),getComputedStyle:()=>({position:'relative'}),
+  setTimeout:fn=>{timers.set(++timerId,fn);return timerId;},clearTimeout:id=>timers.delete(id),
+  requestAnimationFrame:()=>1,cancelAnimationFrame(){},addEventListener(){},removeEventListener(){},
+  highway:{setVisible:v=>visibility.push(v)}};
+ sandbox.window=sandbox;vm.runInNewContext(code,sandbox);
+ return {sandbox,apis,player,canvases,panels,visibility,timers,
+  renderer:()=>sandbox.feedBackViz_tabview(),fetch:fn=>{fetcher=fn;},
+  bundle:{songInfo:{filename:'fixture.feedpak',arrangement_index:0},beats:[]}};
+}
+test('fetch failure rejects readiness, reaches draw fallback and retains a timed notice through destroy',async()=>{
+ const h=harness();h.fetch(async()=>{throw Error('test fetch failed');});const r=h.renderer();r.init(h.canvases[0],h.bundle);
+ await assert.rejects(r.readyPromise,/test fetch failed/);assert.throws(()=>r.draw(h.bundle),/test fetch failed/);
+ r.destroy();assert.equal(h.canvases[0].style.visibility,'');
+ assert.ok(h.player.children.some(e=>e.className==='tabview-error-banner'));
+ for(const fn of h.timers.values())fn();assert.equal(h.player.children.length,0);
+});
+test('success resolves readiness; late render error reaches the owning draw fallback',async()=>{
+ const h=harness(),r=h.renderer();r.init(h.canvases[0],h.bundle);await tick();
+ h.apis[0].renderFinished.emit();await r.readyPromise;
+ assert.equal(h.canvases[0].style.visibility,'hidden');
+ h.apis[0].error.emit(Error('late layout failure'));
+ assert.throws(()=>r.draw(h.bundle),/late layout failure/);assert.equal(h.canvases[0].style.visibility,'');
+ h.apis[0].renderFinished.emit();assert.equal(h.canvases[0].style.visibility,'','stale completion cannot cover the fallback');
+ r.destroy();
+});
+test('superseded fetch cannot reject the replacement initialization',async()=>{
+ const h=harness(),r=h.renderer();let failOld;h.fetch(()=>new Promise((_,reject)=>{failOld=reject;}));
+ r.init(h.canvases[0],h.bundle);const previous=r.readyPromise;await tick();
+ h.fetch(async()=>({ok:true,headers:{get:()=>''},arrayBuffer:async()=>new ArrayBuffer(0)}));
+ r.init(h.canvases[0],h.bundle);await assert.rejects(previous,/superseded/);failOld(Error('old failure'));await tick();
+ h.apis[0].renderFinished.emit();await r.readyPromise;assert.doesNotThrow(()=>r.draw(h.bundle));r.destroy();
+});
+test('failed renderer can be reselected and initialize successfully',async()=>{
+ const h=harness(),r=h.renderer();h.fetch(async()=>{throw Error('failed');});r.init(h.canvases[0],h.bundle);
+ await assert.rejects(r.readyPromise);r.destroy();
+ h.fetch(async()=>({ok:true,headers:{get:()=>''},arrayBuffer:async()=>new ArrayBuffer(0)}));r.init(h.canvases[0],h.bundle);await tick();
+ h.apis[0].renderFinished.emit();await r.readyPromise;assert.doesNotThrow(()=>r.draw(h.bundle));r.destroy();
+});
+test('failure stays scoped to its panel and does not fail another TabView instance',async()=>{
+ const h=harness();h.sandbox.slopsmithSplitscreen={isActive:()=>true,panelChromeFor:c=>h.panels[h.canvases.indexOf(c)]};
+ const a=h.renderer(),b=h.renderer();a.init(h.canvases[0],h.bundle);b.init(h.canvases[1],h.bundle);await tick();
+ h.apis[0].error.emit(Error('panel one failed'));await assert.rejects(a.readyPromise,/panel one failed/);
+ h.apis[1].renderFinished.emit();await b.readyPromise;
+ assert.throws(()=>a.draw(h.bundle));assert.doesNotThrow(()=>b.draw(h.bundle));
+ assert.equal(h.canvases[1].style.visibility,'hidden');assert.ok(!h.visibility.includes(false));
+ a.destroy();b.destroy();
+});

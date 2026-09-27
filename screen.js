@@ -121,16 +121,43 @@ function _tvApplyWhammyMap(score, mapping, model) {
     if (mapping.version!==1 || !Array.isArray(mapping.notes) || !Array.isArray(mapping.beats))
         throw new Error('Unsupported bar-expression mapping');
     const locate=e=>score.tracks[e.track]?.staves[e.staff]?.bars[e.bar]?.voices[e.voice]?.beats[e.beat];
-    const sources=new Map(),addresses=new Set();
+    const sources=new Map(),addresses=new Set(),notes=new Map(),updates=[];
+    const canonical=value=>JSON.stringify(value, function(key, item) {
+        return item && !Array.isArray(item) && typeof item==='object'
+            ? Object.fromEntries(Object.keys(item).sort().map(k=>[k,item[k]])) : item;
+    });
     for(const e of mapping.notes) {
         const key=[e.track,e.staff,e.bar,e.voice,e.beat,e.string].join(':');
         const candidates=locate(e)?.notes.filter(n=>n.string===e.string) || [];
-        if(addresses.has(key) || sources.has(e.sourceId) || candidates.length!==1 || candidates[0].fret!==e.fret)
+        if(addresses.has(key) || candidates.length!==1 || candidates[0].fret!==e.fret
+            || typeof e.sourceId!=='string' || !e.sourceId || !Number.isFinite(e.time)
+            || !Number.isFinite(e.sustain) || e.sustain<0)
             throw new Error('Bar-expression mapping does not match the tab');
         if(e.expression?.version!==1 || e.expression.policy!=='optional' || !Array.isArray(e.expression.segments))
             throw new Error('Invalid mapped bar expression');
-        addresses.add(key);sources.set(e.sourceId,e);
-        candidates[0].feedBackWhammy=JSON.parse(JSON.stringify(e));
+        // Adaptive rhythm can split one source sustain into several written
+        // ties. Repeated source IDs must identify the same expression AND the
+        // same connected tie chain, never another attack at the same fret.
+        const identity=canonical([e.track,e.staff,e.voice,e.string,e.fret,e.time,e.sustain,e.expression]);
+        const group=sources.get(e.sourceId) || {identity,notes:new Set()};
+        if(group.identity!==identity) throw new Error('Inconsistent tied bar expression');
+        addresses.add(key);sources.set(e.sourceId,group);
+        group.notes.add(candidates[0]);notes.set(candidates[0],group);
+        const copy=JSON.parse(JSON.stringify(e));
+        updates.push(()=>{candidates[0].feedBackWhammy=copy;});
+    }
+    for(const group of sources.values()) {
+        const attacks=[...group.notes].filter(n=>!n.isTieDestination);
+        if(attacks.length!==1) throw new Error('Bar-expression mapping has no unique attack');
+        for(const note of group.notes) {
+            const visited=new Set();
+            let origin=note;
+            while(origin!==attacks[0]) {
+                if(!origin || visited.has(origin) || notes.get(origin)!==group || !origin.isTieDestination)
+                    throw new Error('Bar-expression mapping has an unrelated or missing tie');
+                visited.add(origin);origin=origin.tieOrigin;
+            }
+        }
     }
     const seen=new Set();
     for(const e of mapping.beats) {
@@ -143,16 +170,22 @@ function _tvApplyWhammyMap(score, mapping, model) {
             || !Number.isFinite(p.semitones) || p.semitones < -16 || p.semitones>8 || i>0 && p.position<e.points[i-1].position))
             throw new Error('Invalid bar-expression points');
         if(e.vibrato!==null && !['slight','wide'].includes(e.vibrato)) throw new Error('Invalid bar vibrato');
-        beat.whammyBarPoints=null;beat.minWhammyPoint=null;beat.maxWhammyPoint=null;beat.whammyBarType=model.WhammyType.None;
-        for(const p of e.points)beat.addWhammyBarPoint(new model.BendPoint(Math.max(0,Math.min(60,p.position)),p.semitones*2));
-        if(e.vibrato)beat.vibrato=e.vibrato==='wide'?model.VibratoType.Wide:model.VibratoType.Slight;
-        // A GP display beat can combine multiple source beats. Show a BAR
-        // cue in that case, preserving exact curves without drawing a false
-        // merged pitch path. The game continues to use the original chart.
-        if(e.limitation)beat.text=((beat.text || '')+' BAR').trim();
-        beat.feedBackWhammy=JSON.parse(JSON.stringify(e));
+        const copy=JSON.parse(JSON.stringify(e));
+        const points=e.points.map(p=>new model.BendPoint(Math.max(0,Math.min(60,p.position)),p.semitones*2));
+        updates.push(()=>{
+            beat.whammyBarPoints=null;beat.minWhammyPoint=null;beat.maxWhammyPoint=null;beat.whammyBarType=model.WhammyType.None;
+            for(const point of points)beat.addWhammyBarPoint(point);
+            if(e.vibrato)beat.vibrato=e.vibrato==='wide'?model.VibratoType.Wide:model.VibratoType.Slight;
+            // Different source gestures in one display beat keep the BAR cue
+            // instead of a false merged curve. Gameplay uses the source chart.
+            if(e.limitation)beat.text=((beat.text || '')+' BAR').trim();
+            beat.feedBackWhammy=copy;
+        });
     }
-    score.feedBackWhammyLimitations=JSON.parse(JSON.stringify(mapping.limitations || []));
+    // Validate the complete mapping before touching the score.
+    const limitations=JSON.parse(JSON.stringify(mapping.limitations || []));
+    for(const update of updates)update();
+    score.feedBackWhammyLimitations=limitations;
     return score;
 }
 
@@ -450,6 +483,10 @@ function createFactory() {
     let _tvErrorBanner = null;   // current error banner element (if any)
     let _tvErrorBannerTimeout = null;
     let _tvReady = false;
+    let _tvRenderError = null;
+    let _tvReadyPromise = null;
+    let _tvResolveReady = null;
+    let _tvRejectReady = null;
 
     // Highway canvas swap state
     let _tvHighwayCanvas = null;
@@ -730,6 +767,19 @@ function createFactory() {
         }
     }
 
+    function _tvFail(error) {
+        _tvRenderError = error instanceof Error ? error : new Error(String(error || 'render failed'));
+        _tvReady = false;
+        _tvStopCursorLoop();
+        if (_tvContainer) _tvContainer.style.visibility = 'hidden';
+        if (_tvHighwayCanvas) _tvHighwayCanvas.style.visibility = _tvPrevVisibility || '';
+        _tvSetHighwayVisible(null);
+        _tvShowErrorBanner(_tvRenderError.message + '. Returning to the highway.');
+        // Let the owning highway restore its default renderer and picker.
+        // Merely unhiding the canvas leaves it blank: TabView owns draw().
+        if (_tvRejectReady) _tvRejectReady(_tvRenderError);
+    }
+
     // ── alphaTab init ───────────────────────────────────────────────
 
     async function _tvInitAlphaTab(arrayBuffer, myToken, harmonicMap, barMap, contactMap, rhythmMap) {
@@ -806,7 +856,7 @@ function createFactory() {
         });
 
         _tvApi.renderFinished.on(function () {
-            if (_tvInitToken !== myToken) return;
+            if (_tvInitToken !== myToken || _tvRenderError) return;
             _tvReady = true;
             // Start the self-driven cursor loop here (not in init()): _tvReady
             // is only true once the score has rendered, so starting earlier
@@ -829,6 +879,7 @@ function createFactory() {
             _tvFailedArr = null;
             // A successful render supersedes any prior error banner.
             _tvRemoveErrorBanner();
+            if (_tvResolveReady) _tvResolveReady();
             // Re-place the marker after rendering. alphaTab can publish its
             // replacement boundsLookup after this callback, so the cursor
             // loop also detects that replacement while playback is paused.
@@ -856,11 +907,8 @@ function createFactory() {
                 _tvFailedFile = failedFile;
                 _tvFailedArr = failedArr;
             }
-            if (_tvContainer) _tvContainer.style.visibility = 'hidden';
-            if (_tvHighwayCanvas) _tvHighwayCanvas.style.visibility = _tvPrevVisibility || '';
-            _tvSetHighwayVisible(null);
             const msg = (e && e.message) ? e.message : (typeof e === 'string' ? e : 'render failed');
-            _tvShowErrorBanner(msg);
+            _tvFail(msg);
         });
 
         _tvApi.load(score);
@@ -972,12 +1020,9 @@ function createFactory() {
             // that's being reloaded into a failing song, or the freshly
             // created empty container from an initial failed load) so
             // the highway fallback actually becomes visible.
-            if (_tvContainer) _tvContainer.style.visibility = 'hidden';
-            if (_tvHighwayCanvas) _tvHighwayCanvas.style.visibility = _tvPrevVisibility || '';
-            _tvSetHighwayVisible(null);
             const msg = (e && e.message) ? e.message : String(e);
             console.warn('[TabView] ' + msg);
-            _tvShowErrorBanner(msg);
+            _tvFail(e);
         } finally {
             // Only clear the loading-target if this fetch is still the
             // latest in-flight one — a newer token bump already cleared /
@@ -1164,7 +1209,7 @@ function createFactory() {
 
     // ── Teardown ────────────────────────────────────────────────────
 
-    function _teardown(restoreCanvas) {
+    function _teardown(restoreCanvas, keepErrorBanner = false) {
         _tvStopCursorLoop();
         _tvReady = false;
         _tvLastTick = -1;
@@ -1183,7 +1228,7 @@ function createFactory() {
             _tvApi = null;
         }
         _tvRemoveContainer();
-        _tvRemoveErrorBanner();
+        if (!keepErrorBanner) _tvRemoveErrorBanner();
         if (restoreCanvas && _tvHighwayCanvas) {
             _tvHighwayCanvas.style.visibility = _tvPrevVisibility;
             _tvSetHighwayVisible(null);
@@ -1195,6 +1240,7 @@ function createFactory() {
     // ── Factory return: setRenderer contract ────────────────────────
 
     return {
+        get readyPromise() { return _tvReadyPromise; },
         init(canvas, bundle) {
             // Always run teardown at init start, even when there's
             // no visible container/API to tear down. A previous
@@ -1217,6 +1263,16 @@ function createFactory() {
             // the freshly-passed canvas without aliasing.
             _teardown(/* restoreCanvas */ true);
             window.removeEventListener('resize', _onWinResize);
+
+            if (_tvRejectReady) _tvRejectReady(new Error('Tab View initialization superseded'));
+            _tvRenderError = null;
+            _tvReadyPromise = new Promise((resolve, reject) => {
+                _tvResolveReady = resolve;
+                _tvRejectReady = reject;
+            });
+            // Older hosts may not consume readyPromise. The draw-error path
+            // below still uses their existing renderer fallback mechanism.
+            _tvReadyPromise.catch(() => {});
 
             const myToken = ++_tvInitToken;
             _tvHighwayCanvas = canvas;
@@ -1247,6 +1303,10 @@ function createFactory() {
         },
         draw(bundle) {
             if (!_isReady || !bundle) return;
+            // A later layout error can happen after readyPromise resolved.
+            // Report it through the host's ordinary draw-failure fallback,
+            // scoped to this renderer (including a splitscreen panel).
+            if (_tvRenderError) throw _tvRenderError;
 
             // Cache beats per frame so cursor sync uses the
             // filter-aware beats from THIS instance's bundle, not
@@ -1320,7 +1380,12 @@ function createFactory() {
             _isReady = false;
             _tvInitToken++;  // invalidate in-flight fetches
             window.removeEventListener('resize', _onWinResize);
-            _teardown(/* restoreCanvas */ true);
+            if (_tvRejectReady) _tvRejectReady(new Error('Tab View initialization cancelled'));
+            _tvResolveReady = null;
+            _tvRejectReady = null;
+            // The fallback destroys this renderer immediately. Leave its
+            // notice mounted until the existing timer dismisses it.
+            _teardown(/* restoreCanvas */ true, !!_tvRenderError);
         },
     };
 }

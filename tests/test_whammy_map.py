@@ -54,3 +54,31 @@ def test_partial_vibrato_does_not_fill_the_display_beat():
     assert m['beats'][0]['vibrato'] is None and m['beats'][0]['points']==[]
     assert len(m['limitations'])==1
     assert m['notes'][0]['expression']['segments'][0]==e
+
+
+def test_adaptive_ties_keep_one_source_expression_at_distinct_addresses():
+    import base64
+    import guitarpro
+    from io import BytesIO
+    from fractions import Fraction as F
+    from test_adaptive_rhythm import song_at
+    song = song_at([F(0), F(5, 32), F(10, 32)])
+    first = song.arrangements[0].notes[0]
+    first.whammy = deepcopy(bar_song().arrangements[0].notes[0].whammy)
+    original = deepcopy(song)
+    bundle = rs2gp.arrangement_to_gp5(song, include_harmonics=True)
+    entries = bundle['whammy']['notes']
+    assert len(entries) > 1
+    assert len({e['sourceId'] for e in entries}) == 1
+    assert len({(e['bar'], e['voice'], e['beat'], e['string']) for e in entries}) == len(entries)
+    gp = guitarpro.parse(BytesIO(base64.b64decode(bundle['gp5'])))
+    types = []
+    for entry in entries:
+        note = next(n for n in gp.tracks[0].measures[entry['bar']].voices[entry['voice']].beats[entry['beat']].notes
+                    if n.string == 7 - entry['string'])
+        types.append(note.type)
+        assert entry['expression'] == first.whammy
+        assert entry['time'] == first.time and entry['sustain'] == first.sustain
+    assert types[0] == guitarpro.NoteType.normal
+    assert all(t == guitarpro.NoteType.tie for t in types[1:])
+    assert song == original
