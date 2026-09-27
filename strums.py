@@ -39,8 +39,12 @@ def load_context(loaded, index):
                 or projection.get('sourceSha256')!=digest):
             raise ValueError('Voice projection does not match the retained source')
     selected=[]
+    from hybrid_sources import load_lineage, includes
+    hybrid = load_lineage(loaded, index)
     for group in groups:
-        if group['trackId'] != loaded.arrangement_ids[index]: continue
+        if hybrid:
+            if not includes(hybrid, group, recording_time=True): continue
+        elif group['trackId'] != loaded.arrangement_ids[index]: continue
         match=BEAT_ID.fullmatch(group['sourceId'])
         if not match: raise ValueError('Invalid strum source identity')
         pi,mi,vi,bi=map(int,match.groups())

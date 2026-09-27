@@ -95,7 +95,14 @@ def setup(app: FastAPI, context: dict):
                     retained=json.loads(evidence.read_text(encoding='utf-8'))
                     idx=max(0,min(arrangement,len(loaded.song.arrangements)-1))
                     track=loaded.arrangement_ids[idx]
-                    continuations=[row for row in retained.get('continuations',[]) if row.get('trackId')==track]
+                    from hybrid_sources import load_lineage, includes
+                    lineage = load_lineage(loaded, idx)
+                    if lineage:
+                        if retained.get('sourceSha256') != lineage['sourceSha256']:
+                            raise ValueError('Harmonic evidence differs from the Hybrid Lead source')
+                        continuations=[row for row in retained.get('continuations',[]) if includes(lineage, row)]
+                    else:
+                        continuations=[row for row in retained.get('continuations',[]) if row.get('trackId')==track]
                 from strums import load_context
                 idx=max(0,min(arrangement,len(loaded.song.arrangements)-1))
                 context=load_context(loaded,idx) if loaded.song.arrangements else None
