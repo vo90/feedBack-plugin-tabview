@@ -16,7 +16,7 @@ def load_lineage(loaded, index):
     if not entry.get('derived'):
         return None
     policy = entry['derived'].get('kind')
-    version = {'hybrid-lead-v1': 1, 'hybrid-lead-v2': 2}.get(policy)
+    version = {'hybrid-lead-v1': 1, 'hybrid-lead-v2': 2, 'hybrid-lead-v3': 3}.get(policy)
     from strums import _read
     if (not version or entry['derived'] != {'kind': policy, 'receipt': 'import/hybrid-lead.json'}
             or recipe.get('hybridLeadFile') != 'import/hybrid-lead.json' or recipe.get('preservationContract', 0) < 31 + (version or 0)):
@@ -47,8 +47,9 @@ def load_lineage(loaded, index):
     expected['name'] = 'Hybrid Lead'
     expected.pop('phrases', None)
     expected.pop('ext', None)
-    if version == 2:
-        if recipe['hybridLead'].get('policy') != policy or receipt.get('coverage', {}).get('status') != 'complete':
+    if version >= 2:
+        allowed_coverage = {'complete', 'limited'} if version == 3 else {'complete'}
+        if recipe['hybridLead'].get('policy') != policy or receipt.get('coverage', {}).get('status') not in allowed_coverage:
             raise ValueError('Hybrid Lead lacks verified primary coverage')
         refs = receipt.get('mainEvents', [])
         if any(r.get('kind') not in ('notes','chords') or not r.get('sourceIds') or not r.get('occurrences') for r in refs):
@@ -89,7 +90,7 @@ def load_lineage(loaded, index):
             expected[ref['kind']].append(event)
     for kind in ('notes', 'chords'):
         expected[kind].sort(key=lambda e: e['t'])
-    if version == 2:
+    if version >= 2:
         used_templates = {c['id'] for c in expected['chords']}
         kept = [i for i,t in enumerate(expected['templates']) if i in used_templates or 127 not in t['frets']]
         ids = {old:new for new,old in enumerate(kept)}
@@ -116,6 +117,12 @@ def includes(receipt, group, *, recording_time=False):
         if recording_time:
             times = [n['t'] for n in group.get('notes', [])] or [group['time']]
             if min(times) >= passage['recordingStart'] - 1.1e-6 and max(times) < passage['recordingEnd'] + 1.1e-6:
+                if receipt.get('version', 1) >= 3:
+                    source_id = group.get('sourceId', '')
+                    if not any(group.get('occurrence') in ref['occurrences'] and any(
+                            sid == source_id or sid.startswith(source_id + ':') for sid in ref['sourceIds'])
+                            for ref in passage['events']):
+                        continue
                 return True
         elif any(group.get('sourceId') in ref['sourceIds'] and group.get('occurrence') in ref['occurrences'] for ref in passage['events']):
             return True

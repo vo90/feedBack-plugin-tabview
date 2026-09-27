@@ -70,13 +70,15 @@ def test_tampered_or_partial_projection_is_rejected(tmp_path, fault):
     with pytest.raises(ValueError): strums.load_context(loaded, 2)
 
 
-def test_v2_projects_only_retained_main_strums_and_harmonic_occurrences(tmp_path):
+@pytest.mark.parametrize('version,coverage', [(2, 'complete'), (3, 'complete'), (3, 'limited')])
+def test_primary_policies_project_only_retained_main_strums_and_harmonic_occurrences(tmp_path, version, coverage):
     loaded,receipt,group,write = fixture(tmp_path)
-    options = {**receipt['options'],'policy':'hybrid-lead-v2'}
-    receipt.update(version=2,policy='hybrid-lead-v2',options=options,coverage={'status':'complete'},
+    policy = f'hybrid-lead-v{version}'
+    options = {**receipt['options'],'policy':policy}
+    receipt.update(version=version,policy=policy,options=options,coverage={'status':coverage},
                    mainEvents=[{'kind':'notes','index':0,'sourceIds':['songsterr:0:0:0:0:0'],'occurrences':[1]}])
-    loaded.manifest['song_import'].update(preservationContract=33,hybridLead=options)
-    loaded.manifest['arrangements'][-1]['derived']['kind']='hybrid-lead-v2'
+    loaded.manifest['song_import'].update(preservationContract=31 + version,hybridLead=options)
+    loaded.manifest['arrangements'][-1]['derived']['kind']=policy
     write('import/hybrid-lead.json',receipt)
     assert load_lineage(loaded,2)==receipt
     main={'trackId':'0','sourceId':'songsterr:0:0:0:0','occurrence':1}
@@ -95,3 +97,58 @@ def test_v2_projects_only_retained_main_strums_and_harmonic_occurrences(tmp_path
     receipt['mainEvents']=[{'kind':'notes','index':99,'sourceIds':['x'],'occurrences':[1]}]
     write('import/hybrid-lead.json',receipt)
     with pytest.raises(ValueError): load_lineage(loaded,2)
+
+
+def v3_fixture(tmp_path):
+    loaded, receipt, group, write = fixture(tmp_path)
+    options = {**receipt['options'], 'policy': 'hybrid-lead-v3'}
+    receipt.update(version=3, policy='hybrid-lead-v3', options=options, coverage={'status': 'complete'},
+                   mainEvents=[{'kind': 'notes', 'index': 0, 'sourceIds': ['songsterr:0:0:0:0:0'], 'occurrences': [1]}])
+    loaded.manifest['song_import'].update(preservationContract=34, hybridLead=options)
+    loaded.manifest['arrangements'][-1]['derived']['kind'] = 'hybrid-lead-v3'
+    write('import/hybrid-lead.json', receipt)
+    return loaded, receipt, group, write
+
+
+def test_v3_sounding_tail_does_not_select_later_unowned_strum_attacks(tmp_path):
+    loaded, receipt, group, write = v3_fixture(tmp_path)
+    # The selected lead sustains until 3.0, but ownership ended at 2.2. A
+    # different source beat may attack underneath that tail and is not selected.
+    receipt['passages'][0].update(recordingOwnedStart=2, recordingOwnedEnd=2.2)
+    write('import/hybrid-lead.json', receipt)
+    assert load_lineage(loaded, 2) == receipt
+    assert includes(receipt, group, recording_time=True)
+    unselected = {**deepcopy(group), 'sourceId': 'songsterr:1:0:0:1', 'time': 2.5}
+    for note in unselected['notes']:
+        note['t'] += .5
+    assert not includes(receipt, unselected, recording_time=True)
+    assert not includes(receipt, {**group, 'occurrence': 2}, recording_time=True)
+    outside = deepcopy(group)
+    for note in outside['notes']:
+        note['t'] += 2
+    assert not includes(receipt, outside, recording_time=True)
+
+
+@pytest.mark.parametrize('field', ['tuning', 'capo'])
+def test_v3_still_rejects_different_donor_setup_with_matching_hashes(tmp_path, field):
+    loaded, receipt, _, write = v3_fixture(tmp_path)
+    donor = json.loads((tmp_path / 'donor.json').read_text())
+    donor[field] = [1] * 6 if field == 'tuning' else 1
+    receipt['sources'][1]['chartSha256'] = write('donor.json', donor)
+    write('import/hybrid-lead.json', receipt)
+    with pytest.raises(ValueError, match='Incompatible'):
+        load_lineage(loaded, 2)
+
+
+@pytest.mark.parametrize('fault', ['contract', 'coverage', 'membership'])
+def test_v3_identity_and_exact_copy_checks_remain_mandatory(tmp_path, fault):
+    loaded, receipt, _, write = v3_fixture(tmp_path)
+    if fault == 'contract':
+        loaded.manifest['song_import']['preservationContract'] = 33
+    elif fault == 'coverage':
+        receipt['coverage']['status'] = 'unknown'
+    else:
+        receipt['passages'][0]['events'] = receipt['passages'][0]['events'][:1]
+    write('import/hybrid-lead.json', receipt)
+    with pytest.raises(ValueError):
+        load_lineage(loaded, 2)
