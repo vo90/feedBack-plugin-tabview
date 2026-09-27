@@ -4,6 +4,7 @@ const tick=()=>new Promise(resolve=>setImmediate(resolve));
 function harness(){
  function element(){return {style:{visibility:''},dataset:{},children:[],clientHeight:800,
   appendChild(e){e.parentElement=this;this.children.push(e);},setAttribute(){},querySelector(){return null;},
+  querySelectorAll(selector){return this.children.filter(e=>'.'+e.className===selector);},
   remove(){if(this.parentElement)this.parentElement.children=this.parentElement.children.filter(e=>e!==this);},
   scrollTo(){}};}
  const player=element(),canvases=[element(),element()],panels=[element(),element()],apis=[],visibility=[],timers=new Map();
@@ -53,6 +54,13 @@ test('failed renderer can be reselected and initialize successfully',async()=>{
  await assert.rejects(r.readyPromise);r.destroy();
  h.fetch(async()=>({ok:true,headers:{get:()=>''},arrayBuffer:async()=>new ArrayBuffer(0)}));r.init(h.canvases[0],h.bundle);await tick();
  h.apis[0].renderFinished.emit();await r.readyPromise;assert.doesNotThrow(()=>r.draw(h.bundle));r.destroy();
+});
+test('new successful instance removes the retired instance notice on its own surface',async()=>{
+ const h=harness(),failed=h.renderer();h.fetch(async()=>{throw Error('failed');});failed.init(h.canvases[0],h.bundle);
+ await assert.rejects(failed.readyPromise);failed.destroy();assert.equal(h.player.querySelectorAll('.tabview-error-banner').length,1);
+ h.fetch(async()=>({ok:true,headers:{get:()=>''},arrayBuffer:async()=>new ArrayBuffer(0)}));
+ const replacement=h.renderer();replacement.init(h.canvases[0],h.bundle);await tick();h.apis[0].renderFinished.emit();await replacement.readyPromise;
+ assert.equal(h.player.querySelectorAll('.tabview-error-banner').length,0);replacement.destroy();
 });
 test('failure stays scoped to its panel and does not fail another TabView instance',async()=>{
  const h=harness();h.sandbox.slopsmithSplitscreen={isActive:()=>true,panelChromeFor:c=>h.panels[h.canvases.indexOf(c)]};

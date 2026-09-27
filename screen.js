@@ -879,6 +879,9 @@ function createFactory() {
             _tvFailedArr = null;
             // A successful render supersedes any prior error banner.
             _tvRemoveErrorBanner();
+            // Reselection creates a new renderer instance. Clear the retired
+            // instance's timed notice on this surface, leaving other panels alone.
+            _resolveMount(_tvHighwayCanvas)?.querySelectorAll('.tabview-error-banner').forEach(e=>e.remove());
             if (_tvResolveReady) _tvResolveReady();
             // Re-place the marker after rendering. alphaTab can publish its
             // replacement boundsLookup after this callback, so the cursor
