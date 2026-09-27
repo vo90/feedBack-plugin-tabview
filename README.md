@@ -88,3 +88,11 @@ FeedForge contract 27 can separate conflicting Songsterr voices into selectable
 arrangements. Their strum groups retain the original source beat identity and use
 `song_import.voicesFile` to bind each derived arrangement to its original track
 and voice. TabView checks that mapping and source hash before drawing the stroke.
+# Explicit pickup bars
+
+FeedForge preservation contract 34 can include `song_import.pickupTimelineFile`.
+TabView validates its retained-source hash and bounded monotonic clock, then uses
+it to display the original short measure even when no metronome tick occurs at
+its first note. The GP5 bundle restores alphaTab's pickup flag and carries an
+exact display cursor clock. This affects display only; game note/scoring timing
+and metronome beats are untouched. Ordinary packages keep the existing path.
