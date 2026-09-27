@@ -20,6 +20,12 @@ class RhythmError(ValueError):
 
 
 def quarter(time, measure):
+    if measure.get('quarter_anchors'):
+        anchors = measure['quarter_anchors']
+        i = max(0, min(len(anchors)-2, bisect_right(anchors, time, key=lambda a:a['time'])-1))
+        a,b = anchors[i:i+2]
+        span = (b['time']-a['time'])/(b['quarter']-a['quarter'])
+        return a['quarter']+(time-a['time'])/span, span
     times = measure['beat_times'][:measure['num_beats']]
     index = max(0, min(len(times) - 1, bisect_right(times, time) - 1))
     end = times[index + 1] if index + 1 < len(times) else measure['end_time']
@@ -30,6 +36,11 @@ def quarter(time, measure):
 
 
 def seconds(position, measure):
+    if measure.get('quarter_anchors'):
+        anchors = measure['quarter_anchors']
+        i = max(0, min(len(anchors)-2, bisect_right(anchors, position, key=lambda a:a['quarter'])-1))
+        a,b = anchors[i:i+2]
+        return a['time']+(position-a['quarter'])*(b['time']-a['time'])/(b['quarter']-a['quarter'])
     times = measure['beat_times'][:measure['num_beats']]
     index = max(0, min(len(times) - 1, int(position)))
     end = times[index + 1] if index + 1 < len(times) else measure['end_time']
@@ -99,13 +110,16 @@ def layout(events, measure):
     def attempt(grid, require_fit):
         if grid > MAX_GRID or beats * grid > MAX_UNITS:
             return None
-        slots = [max(0, min(beats * grid - 1, int(q * grid + .5))) for q, _ in positions]
+        total = round(beats * grid)
+        if abs(total-beats*grid)>1e-7 or total < 1:
+            return None
+        slots = [max(0, min(total - 1, int(q * grid + .5))) for q, _ in positions]
         if len(slots) != len(set(slots)):
             return None
         if require_fit and any(abs(q - slot / grid) * span > FIT_SECONDS
                                for (q, span), slot in zip(positions, slots)):
             return None
-        edges = sorted({0, beats * grid, *slots})
+        edges = sorted({0, total, *slots})
         try:
             for left, right in zip(edges, edges[1:]):
                 _parts(right - left, grid)

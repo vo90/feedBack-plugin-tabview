@@ -32,7 +32,7 @@ test('grace timing uses existing renderer positions',()=>{
 function cursorHarness(){
  const code=source.slice(source.indexOf('    function _tvSyncCursor('),source.indexOf('    // ── Self-driven cursor loop'));
  const run=new Function(`
- const TICKS_PER_BEAT=960,_tvApi={},_tvReady=true,_tvLatestBeats=[];
+ const TICKS_PER_BEAT=960,_tvApi={},_tvReady=true,_tvLatestBeats=[],_tvPickupClock=null;
  let _tvLastTick=-1,_tvLastBeat=null,_tvLastBounds=null,calls=0;
  const beats=[{}, {}, {}];
  const _tvTimeToTick=t=>t;

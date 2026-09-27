@@ -406,10 +406,39 @@ function _tvApplyRhythmMap(score, mapping) {
         seen.add(key);
         beat.duration = 128;
     }
-    return seen.size > 0;
+    const pickups = mapping.pickups || [];
+    if (!Array.isArray(pickups)) throw new Error('Invalid tab pickup mapping');
+    const bars = new Set();
+    for (const p of pickups) {
+        const bar = score.tracks[0]?.staves[0]?.bars[p.bar];
+        const quarters = Math.max(...(bar?.voices || []).map(v => v.beats.reduce((sum,b) =>
+            sum + 4 / b.duration * (2-Math.pow(2,-(b.dots||0))) * (b.tupletDenominator||1)/(b.tupletNumerator||1),0)));
+        if (!bar?.masterBar || bars.has(p.bar) || !Number.isFinite(p.quarters) || p.quarters <= 0
+            || Math.abs(quarters-p.quarters)>1e-7
+            || p.quarters >= bar.masterBar.timeSignatureNumerator*4/bar.masterBar.timeSignatureDenominator)
+            throw new Error('Tab pickup duration differs from its display score');
+        bars.add(p.bar);bar.masterBar.isAnacrusis = true;
+    }
+    return seen.size > 0 || bars.size > 0;
 }
 
-function _tvTimeToTick(seconds, beats) {
+function _tvValidatePickupClock(clock) {
+    if (clock == null) return null;
+    if (!Array.isArray(clock) || clock.length<2 || clock.length>100000
+        || clock.some((p,i) => !Number.isFinite(p.time) || !Number.isSafeInteger(p.tick) || p.tick<0
+            || i && (p.time<=clock[i-1].time || p.tick<=clock[i-1].tick)) || clock[0].tick!==0)
+        throw new Error('Invalid tab pickup cursor clock');
+    return clock;
+}
+
+function _tvTimeToTick(seconds, beats, clock) {
+    if (clock) {
+        let lo=0, hi=clock.length-2, index=0;
+        while(lo<=hi){const mid=(lo+hi)>>1;if(clock[mid].time<=seconds){index=mid;lo=mid+1;}else hi=mid-1;}
+        const a=clock[index],b=clock[index+1];
+        const f=Math.min(1,Math.max(0,(seconds-a.time)/(b.time-a.time)));
+        return TICKS_PER_BEAT+Math.round(a.tick+f*(b.tick-a.tick));
+    }
     if (!beats || beats.length < 2) return TICKS_PER_BEAT;
     if (seconds < beats[0].time) return TICKS_PER_BEAT;
 
@@ -544,6 +573,7 @@ function createFactory() {
     // under Wave C (the bare `highway` global used in Wave B was the
     // main-player's highway, not ours under splitscreen).
     let _tvLatestBeats = null;
+    let _tvPickupClock = null;
 
     // Monotonic init counter. Each init() bumps it; fetch / alphaTab
     // callbacks capture the token and bail if a newer init has started
@@ -822,6 +852,7 @@ function createFactory() {
         const importSettings = new alphaTab.Settings();
         importSettings.fillFromJson(settings);
         const score = alphaTab.importer.ScoreLoader.loadScoreFromBytes(bytes, importSettings);
+        _tvPickupClock = _tvValidatePickupClock(rhythmMap?.clock);
         if (_tvApplyRhythmMap(score, rhythmMap)) score.finish(importSettings);
         if (harmonicMap) _tvApplyHarmonicMap(score, harmonicMap, alphaTab.model);
         if (barMap) _tvApplyWhammyMap(score, barMap, alphaTab.model);
@@ -1071,7 +1102,7 @@ function createFactory() {
     function _tvSyncCursor(currentTime) {
         if (!_tvApi || !_tvReady) return;
 
-        const tick = _tvTimeToTick(currentTime, _tvLatestBeats);
+        const tick = _tvTimeToTick(currentTime, _tvLatestBeats, _tvPickupClock);
         const bounds = _tvApi.boundsLookup;
         const layoutChanged = bounds !== _tvLastBounds;
         // A fixed 30-tick throttle can skip an entire short note or a paused
@@ -1223,6 +1254,7 @@ function createFactory() {
         _tvFailedFile = null;
         _tvFailedArr = null;
         _tvLatestBeats = null;
+        _tvPickupClock = null;
         _tvAtBeats = [];
         _tvLastBeat = null;
         _tvLastBounds = null;

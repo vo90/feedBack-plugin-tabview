@@ -6,6 +6,7 @@ import hashlib
 from copy import deepcopy
 import guitarpro
 import rhythm
+import pickup
 from whammy_map import build_mapping
 from harmonic_contacts import display_events, build_mapping as contact_mapping
 from song import arrangement_string_count
@@ -36,7 +37,7 @@ BASS_STANDARD = {
 }
 
 
-def arrangement_to_gp5(song, arrangement_index=0, include_harmonics=False, strum_context=None):
+def arrangement_to_gp5(song, arrangement_index=0, include_harmonics=False, strum_context=None, pickup_context=None):
     """Convert a Song arrangement to GP5 bytes."""
     arr = song.arrangements[arrangement_index]
 
@@ -53,7 +54,7 @@ def arrangement_to_gp5(song, arrangement_index=0, include_harmonics=False, strum
     # padded value of 6 (trustworthy for sloppak/GP-imported sources).
     num_strings = arrangement_string_count(arr)
 
-    measures_info = _parse_measures(song.beats)
+    measures_info = pickup.measures(_parse_measures(pickup.boundaries(song.beats, pickup_context)), pickup_context)
     if not measures_info:
         measures_info = [_fallback_measure(song.song_length)]
 
@@ -115,8 +116,9 @@ def arrangement_to_gp5(song, arrangement_index=0, include_harmonics=False, strum
     for i, m_info in enumerate(measures_info):
         header = guitarpro.MeasureHeader(number=i + 1, start=tick)
         header.timeSignature = guitarpro.TimeSignature()
-        header.timeSignature.numerator = m_info["num_beats"]
-        header.timeSignature.denominator = guitarpro.Duration(value=4)
+        signature = m_info.get('signature', [m_info['num_beats'], 4])
+        header.timeSignature.numerator = signature[0]
+        header.timeSignature.denominator = guitarpro.Duration(value=signature[1])
         gp.measureHeaders.append(header)
 
         m_events = [
@@ -176,7 +178,9 @@ def arrangement_to_gp5(song, arrangement_index=0, include_harmonics=False, strum
                                     dead=n.type==guitarpro.NoteType.dead) for n in beat.notes]))
     return {"version":1, "gp5":base64.b64encode(data).decode('ascii'),
             "sha256":hashlib.sha256(data).hexdigest(), "harmonics":mapping,
-            "rhythm":{"version":1,"shortDurations":short_durations},
+            "rhythm":{"version":1,"shortDurations":short_durations,
+                      **({'pickups':[dict(bar=i,quarters=m['num_beats']) for i,m in enumerate(measures_info) if m.get('pickup')],
+                          'clock':pickup.cursor_clock(measures_info)} if pickup_context else {})},
             "whammy":build_mapping(track,measures_info,bar_notes),
             "harmonicContacts":contact_mapping(track,contact_notes)}
 
@@ -458,11 +462,11 @@ def _dur_sixteenths(d):
 
 def _create_beats(events, m_info, voice, num_strings, remap=None, harmonic_notes=None, bar_notes=None, contact_notes=None):
     """Build GP Beat list for one measure."""
-    if not events:
+    if not events and not m_info.get('pickup'):
         return _rest_beats(m_info['num_beats'] * SUBDIV, voice)
 
     grid, onset_slots = rhythm.layout(events, m_info)
-    total = m_info['num_beats'] * grid
+    total = round(m_info['num_beats'] * grid)
     decompose = _decompose_sixteenths if grid == SUBDIV else lambda n: rhythm.durations(n, grid)
     duration_units = _dur_sixteenths if grid == SUBDIV else lambda d: rhythm.units(d, grid)
 

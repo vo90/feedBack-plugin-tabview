@@ -29,11 +29,11 @@ def setup(app: FastAPI, context: dict):
     from rs2gp import arrangement_to_gp5
     from rhythm import RhythmError
 
-    def _song_to_gp5(song, arrangement: int, harmonics: bool = False, continuations=None, strum_context=None) -> Response:
+    def _song_to_gp5(song, arrangement: int, harmonics: bool = False, continuations=None, strum_context=None, pickup_context=None) -> Response:
         if not song.arrangements:
             return Response("No arrangements found", status_code=404)
         idx = max(0, min(arrangement, len(song.arrangements) - 1))
-        gp5_bytes = arrangement_to_gp5(song, idx, include_harmonics=harmonics, strum_context=strum_context)
+        gp5_bytes = arrangement_to_gp5(song, idx, include_harmonics=harmonics, strum_context=strum_context, pickup_context=pickup_context)
         if harmonics:
             gp5_bytes['sourceHarmonicContinuations']=continuations or []
             return JSONResponse(gp5_bytes)
@@ -99,7 +99,8 @@ def setup(app: FastAPI, context: dict):
                 from strums import load_context
                 idx=max(0,min(arrangement,len(loaded.song.arrangements)-1))
                 context=load_context(loaded,idx) if loaded.song.arrangements else None
-                return _song_to_gp5(loaded.song, arrangement, harmonics, continuations, context)
+                from pickup import load_context as load_pickups
+                return _song_to_gp5(loaded.song, arrangement, harmonics, continuations, context, load_pickups(loaded))
 
             # Any non-package input is unsupported.
             return Response(
