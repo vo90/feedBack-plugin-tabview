@@ -88,6 +88,15 @@ FeedForge contract 27 can separate conflicting Songsterr voices into selectable
 arrangements. Their strum groups retain the original source beat identity and use
 `song_import.voicesFile` to bind each derived arrangement to its original track
 and voice. TabView checks that mapping and source hash before drawing the stroke.
+
+Hybrid Lead v3 arrangements reuse these groups through their saved selection
+report. TabView verifies the source and hybrid chart hashes and the selected
+notes, including their timing and effects. It groups a stroke only when every
+member was selected from the same original arrangement, beat and occurrence.
+Partial or ambiguous selections remain separate attacks. This also works with
+existing packages that already contain the v3 selection report; no reimport is
+needed. It does not change gameplay notes or create additional hybrid passages.
+
 # Explicit pickup bars
 
 FeedForge preservation contract 34 can include `song_import.pickupTimelineFile`.
