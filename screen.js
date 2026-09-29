@@ -284,6 +284,23 @@ function _tvConfigureBarGlyphs(library) {
 const TICKS_PER_BEAT = 960;
 
 let _alphaTabLoadPromise = null;
+// Restore full Unicode only after the legacy GP5 has been decoded. GP5 exports
+// without this optional bundle field retain their existing metadata.
+function _tvApplyMetadata(score, metadata) {
+    if (metadata == null) return;
+    if (metadata.version !== 1 || score.tracks?.length !== 1 ||
+        !['title', 'artist', 'album', 'trackName'].every(k => typeof metadata[k] === 'string')) {
+        throw new Error('Invalid tab display metadata');
+    }
+    score.title = metadata.title;
+    score.artist = metadata.artist;
+    score.album = metadata.album;
+    score.tracks[0].name = metadata.trackName;
+    // alphaTab 1.8.2 already generated a 10-character short name from the
+    // GP5 fallback. Rebuild it without splitting a Unicode surrogate pair.
+    score.tracks[0].shortName = Array.from(metadata.trackName).slice(0, 10).join('');
+}
+
 function _tvLoadScript() {
     if (window.alphaTab) return Promise.resolve();
     if (_alphaTabLoadPromise) return _alphaTabLoadPromise;
@@ -812,7 +829,7 @@ function createFactory() {
 
     // ── alphaTab init ───────────────────────────────────────────────
 
-    async function _tvInitAlphaTab(arrayBuffer, myToken, harmonicMap, barMap, contactMap, rhythmMap) {
+    async function _tvInitAlphaTab(arrayBuffer, myToken, harmonicMap, barMap, contactMap, rhythmMap, metadata) {
         const c = _tvCreateContainer();
         if (!c) return;
 
@@ -829,6 +846,7 @@ function createFactory() {
         if (_tvAtMount) _tvAtMount.innerHTML = '';
 
         const settings = {
+            importer: { encoding: 'windows-1252' },
             core: {
                 fontDirectory: ALPHATAB_CDN_BASE + '/font/',
                 // Build the bounds lookup during layout so we can map a
@@ -852,6 +870,7 @@ function createFactory() {
         const importSettings = new alphaTab.Settings();
         importSettings.fillFromJson(settings);
         const score = alphaTab.importer.ScoreLoader.loadScoreFromBytes(bytes, importSettings);
+        _tvApplyMetadata(score, metadata);
         _tvPickupClock = _tvValidatePickupClock(rhythmMap?.clock);
         if (_tvApplyRhythmMap(score, rhythmMap)) score.finish(importSettings);
         if (harmonicMap) _tvApplyHarmonicMap(score, harmonicMap, alphaTab.model);
@@ -990,7 +1009,7 @@ function createFactory() {
             const resp = await fetch(url);
             if (_tvInitToken !== myToken) return;
             if (!resp.ok) throw new Error(await resp.text());
-            let data, harmonicMap, barMap, contactMap, rhythmMap, sourceContinuations=[];
+            let data, harmonicMap, barMap, contactMap, rhythmMap, metadata, sourceContinuations=[];
             if ((resp.headers.get('content-type') || '').includes('application/json')) {
                 const bundle=await resp.json();
                 if (bundle.version!==1) throw new Error('Unsupported tab mapping version');
@@ -1002,6 +1021,7 @@ function createFactory() {
                 barMap=bundle.whammy;
                 contactMap=bundle.harmonicContacts;
                 rhythmMap=bundle.rhythm;
+                metadata=bundle.metadata;
                 sourceContinuations=bundle.sourceHarmonicContinuations || [];
             } else data=await resp.arrayBuffer();
             if (_tvInitToken !== myToken) return;
@@ -1021,7 +1041,7 @@ function createFactory() {
                 return;
             }
             _tvSizeContainer();
-            await _tvInitAlphaTab(data, myToken, harmonicMap, barMap, contactMap, rhythmMap);
+            await _tvInitAlphaTab(data, myToken, harmonicMap, barMap, contactMap, rhythmMap, metadata);
             if (_tvInitToken === myToken && _tvAtMount?.parentElement) {
                 _tvAtMount.parentElement.querySelector('.tv-harmonic-detail')?.remove();
                 if(sourceContinuations.some(e=>e.rule!=='timed-artificial-contact') || contactMap?.limitations?.length) {

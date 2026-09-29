@@ -3,6 +3,7 @@
 import io
 import base64
 import hashlib
+import unicodedata
 from copy import deepcopy
 import guitarpro
 import rhythm
@@ -35,6 +36,20 @@ BASS_STANDARD = {
     5: [43, 38, 33, 28, 23],
     6: [48, 43, 38, 33, 28, 23],
 }
+
+
+def _gp5_text(value, limit):
+    """Readable, byte-bounded CP1252 fallback for the temporary GP5 only."""
+    chars = []
+    for char in value:
+        try:
+            char.encode('cp1252')
+        except UnicodeEncodeError:
+            char = ''.join(c for c in unicodedata.normalize('NFKD', char)
+                           if not unicodedata.combining(c))
+            char = char.encode('cp1252', errors='replace').decode('cp1252')
+        chars.append(char)
+    return ''.join(chars)[:limit]
 
 
 def arrangement_to_gp5(song, arrangement_index=0, include_harmonics=False, strum_context=None, pickup_context=None):
@@ -86,10 +101,15 @@ def arrangement_to_gp5(song, arrangement_index=0, include_harmonics=False, strum
             remap = {rs: len(remaining) - rank for rank, rs in enumerate(remaining)}
             num_strings = len(remaining)
 
+    # GP5 uses byte-limited legacy text. Keep the exact Unicode separately for
+    # the renderer; never normalize metadata on the loaded song or FeedPak.
+    metadata = dict(version=1, title=song.title or "Untitled",
+                    artist=song.artist or "", album=song.album or "",
+                    trackName=arr.name or ("Bass" if is_bass else "Guitar"))
     gp = guitarpro.Song()
-    gp.title = song.title or "Untitled"
-    gp.artist = song.artist or ""
-    gp.album = song.album or ""
+    gp.title = _gp5_text(metadata['title'], 255)
+    gp.artist = _gp5_text(metadata['artist'], 255)
+    gp.album = _gp5_text(metadata['album'], 255)
     gp.measureHeaders = []
     gp.tracks = []
 
@@ -97,7 +117,7 @@ def arrangement_to_gp5(song, arrangement_index=0, include_harmonics=False, strum
     gp.tempo = max(30, min(300, round(measures_info[0]["bpm"])))
 
     track = guitarpro.Track(gp, number=1)
-    track.name = arr.name or ("Bass" if is_bass else "Guitar")
+    track.name = _gp5_text(metadata['trackName'], 40)
     track.channel = guitarpro.MidiChannel(
         channel=1 if is_bass else 0,
         effectChannel=3 if is_bass else 2,
@@ -149,7 +169,7 @@ def arrangement_to_gp5(song, arrangement_index=0, include_harmonics=False, strum
     gp.tracks = [track]
 
     buf = io.BytesIO()
-    guitarpro.write(gp, buf)
+    guitarpro.write(gp, buf, encoding='cp1252')
     data = buf.getvalue()
     if not include_harmonics:
         return data
@@ -177,7 +197,7 @@ def arrangement_to_gp5(song, arrangement_index=0, include_harmonics=False, strum
                         notes=[dict(string=len(track.strings)+1-n.string, fret=n.value,
                                     dead=n.type==guitarpro.NoteType.dead) for n in beat.notes]))
     return {"version":1, "gp5":base64.b64encode(data).decode('ascii'),
-            "sha256":hashlib.sha256(data).hexdigest(), "harmonics":mapping,
+            "sha256":hashlib.sha256(data).hexdigest(), "metadata":metadata, "harmonics":mapping,
             "rhythm":{"version":1,"shortDurations":short_durations,
                       **({'pickups':[dict(bar=i,quarters=m['num_beats']) for i,m in enumerate(measures_info) if m.get('pickup')],
                           'clock':pickup.cursor_clock(measures_info)} if pickup_context else {})},

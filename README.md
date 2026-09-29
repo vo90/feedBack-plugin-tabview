@@ -105,3 +105,15 @@ it to display the original short measure even when no metronome tick occurs at
 its first note. The GP5 bundle restores alphaTab's pickup flag and carries an
 exact display cursor clock. This affects display only; game note/scoring timing
 and metronome beats are untouched. Ordinary packages keep the existing path.
+
+## Unicode metadata
+
+The temporary GP5 uses Windows-1252 text with that format's byte limits. Its
+fallback labels keep supported characters, simplify unsupported combining
+accents where possible, and replace otherwise unrepresentable characters with
+`?`. The JSON display bundle also carries the exact Unicode title, artist, album
+and arrangement name. TabView explicitly decodes Windows-1252, then restores the
+full metadata before rendering, including names longer than GP5 permits.
+FeedPak metadata, musical annotations, notes and gameplay are unchanged. The
+plain GP5 download uses the compatible fallback labels; it cannot carry the
+Unicode sidecar. Older bundles without the optional metadata keep their GP5 labels.
