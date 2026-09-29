@@ -38,9 +38,18 @@ def load_context(loaded, index):
                 or projection.get('timeDomain')!='score_seconds'
                 or projection.get('sourceSha256')!=digest):
             raise ValueError('Voice projection does not match the retained source')
+    from hybrid_strums import selected_sources, retains_group
+    # Original arrangements retain the direct track-ID path. Derived hybrids
+    # have a new ID; bind their groups to the retained source-event selection.
+    hybrid = selected_sources(loaded, index, digest) if any(
+        a.get('id') == loaded.arrangement_ids[index] and a.get('derived')
+        for a in loaded.manifest.get('arrangements', [])) else None
     selected=[]
     for group in groups:
-        if group['trackId'] != loaded.arrangement_ids[index]: continue
+        if hybrid is None:
+            if group['trackId'] != loaded.arrangement_ids[index]: continue
+        elif not retains_group(group, hybrid.get(group['trackId'])):
+            continue
         match=BEAT_ID.fullmatch(group['sourceId'])
         if not match: raise ValueError('Invalid strum source identity')
         pi,mi,vi,bi=map(int,match.groups())
