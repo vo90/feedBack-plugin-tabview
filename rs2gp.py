@@ -341,7 +341,7 @@ def _used_string_indices(events):
         if ev["type"] == "chord":
             for nd in ev["chord_notes"]:
                 used.add(nd["string"])
-        else:
+        elif ev['type'] != 'boundary':
             used.add(ev["string"])
     return used
 

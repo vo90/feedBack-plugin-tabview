@@ -37,11 +37,13 @@ def display_events(events, measures):
                 for current in found:
                     if current.get('display_tie'):
                         current.update(picking_chain=True,picking_offset=t-onset,
-                                       tremolo_marks=deepcopy(note.get('tremolo_marks')),tremolo=True)
+                                       tremolo_marks=deepcopy(note.get('tremolo_marks')),tremolo=True,
+                                       performed_time=onset,sustain=note['sustain'])
                 continue
             continuation=deepcopy(note)
-            continuation.update(type='note',time=t,performed_time=t,sustain=end-t,
-                                display_tie=True,picking_offset=t-onset)
+            continuation.update(type='note',time=t,performed_time=onset,sustain=note['sustain'],
+                                display_tie=True,picking_offset=t-onset,
+                                hammer_on=False,pull_off=False,tap=False,accent=False,slide_to=-1,bend=0)
             contact=continuation.get('contact_source')
             if contact and t>=contact['onset']+contact['event']['start']:
                 continuation['harmonic_target']=deepcopy(contact['event']['target'])
