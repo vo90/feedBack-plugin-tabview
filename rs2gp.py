@@ -288,6 +288,8 @@ _NOTE_FIELDS = [
     "harmonic_pitch",
     "harmonic_alias",
     "ghost",
+    "let_ring",
+    "let_ring_sustain",
     "palm_mute",
     "mute",
     "tremolo",
@@ -681,6 +683,7 @@ def _rest_beats(sixteenths, voice, grid=SUBDIV):
 def _apply_effects(gp_note, nd):
     eff = gp_note.effect
     eff.ghostNote = bool(nd.get('ghost'))
+    eff.letRing = bool(nd.get('let_ring') or nd.get('let_ring_sustain')) and not nd.get('mute')
 
     if nd.get("hammer_on") or nd.get("pull_off"):
         eff.hammer = True
