@@ -9,6 +9,7 @@ import guitarpro
 import rhythm
 import pickup
 import tremolo_display
+import wah_display
 from whammy_map import build_mapping
 from harmonic_contacts import display_events, build_mapping as contact_mapping
 from song import arrangement_string_count
@@ -77,6 +78,7 @@ def arrangement_to_gp5(song, arrangement_index=0, include_harmonics=False, strum
     from strums import display_events as group_strums
     events = display_events(group_strums(_merge_events(arr), strum_context),measures_info)
     events = tremolo_display.display_events(events,measures_info)
+    events = wah_display.display_events(events,getattr(arr,"wah",[]) or [],measures_info)
 
     # --- GP3/4/5 hard limit: writeTrack only writes 7 tuning slots, and
     # writeNotes packs note strings into an 8-bit stringFlags byte via
@@ -160,7 +162,9 @@ def arrangement_to_gp5(song, arrangement_index=0, include_harmonics=False, strum
         cur_bpm = max(30, min(300, round(m_info["bpm"])))
         if i > 0 and cur_bpm != prev_bpm and voice.beats:
             first_beat = voice.beats[0]
+            prior_wah = first_beat.effect.mixTableChange.wah if first_beat.effect.mixTableChange else None
             first_beat.effect.mixTableChange = guitarpro.MixTableChange(
+                wah=prior_wah,
                 tempo=guitarpro.MixTableItem(value=cur_bpm, duration=1, allTracks=True),
             )
         prev_bpm = cur_bpm
@@ -523,6 +527,13 @@ def _create_beats(events, m_info, voice, num_strings, remap=None, harmonic_notes
             beat.effect.stroke = guitarpro.BeatStroke(
                 direction=getattr(guitarpro.BeatStrokeDirection, direction), value=32)
 
+        states={state for ev in slots[pos] for state in ev.get('wah', [])}
+        if len(states)==1:
+            beat.effect.mixTableChange=guitarpro.MixTableChange(
+                wah=guitarpro.WahEffect(value=0 if 'open' in states else 100,display=True))
+        elif states:
+            # Both authored instructions survive; never choose a false pedal state.
+            beat.text=((beat.text or '')+' WAH o/+').strip()
         seen = set()
         sounding_until = {}
         picking_notes = set()
@@ -566,7 +577,7 @@ def _create_beats(events, m_info, voice, num_strings, remap=None, harmonic_notes
                     if label not in (beat.text or ""):
                         beat.text = ((beat.text or "") + "; " + label).strip("; ")
                 _apply_effects(note, nd)
-                if nd.get('picking_chain'):picking_notes.add(id(note))
+                if nd.get('picking_chain') or nd.get('display_chain'):picking_notes.add(id(note))
                 if nd.get('mute') and nd['fret'] == 127 and not scrape:
                     marks = nd.get('slide_out_marks')
                     if isinstance(marks, list) and marks:
