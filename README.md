@@ -117,3 +117,11 @@ full metadata before rendering, including names longer than GP5 permits.
 FeedPak metadata, musical annotations, notes and gameplay are unchanged. The
 plain GP5 download uses the compatible fallback labels; it cannot carry the
 Unicode sidecar. Older bundles without the optional metadata keep their GP5 labels.
+# Tremolo picking detail
+
+When a FeedPak includes `tremolo_marks`, Tabview uses its qualified active spans
+and source picking rates. Eighth, sixteenth and thirty-second picking are
+engraved accurately. Internal changes and bar crossings use display ties,
+without extra picked attacks. Unknown/conflicting or GP5-unrepresentable rates
+show `trem.` with no speed label. Legacy boolean tremolo also uses this generic
+instruction instead of inventing an eighth-note rate. The FeedPak is unchanged.

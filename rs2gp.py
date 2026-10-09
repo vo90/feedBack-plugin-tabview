@@ -8,6 +8,7 @@ from copy import deepcopy
 import guitarpro
 import rhythm
 import pickup
+import tremolo_display
 from whammy_map import build_mapping
 from harmonic_contacts import display_events, build_mapping as contact_mapping
 from song import arrangement_string_count
@@ -75,6 +76,7 @@ def arrangement_to_gp5(song, arrangement_index=0, include_harmonics=False, strum
 
     from strums import display_events as group_strums
     events = display_events(group_strums(_merge_events(arr), strum_context),measures_info)
+    events = tremolo_display.display_events(events,measures_info)
 
     # --- GP3/4/5 hard limit: writeTrack only writes 7 tuning slots, and
     # writeNotes packs note strings into an 8-bit stringFlags byte via
@@ -302,6 +304,7 @@ _NOTE_FIELDS = [
 
 def _note_dict(n):
     d = {"string": n.string, "fret": n.fret, "sustain": n.sustain}
+    d['tremolo_marks'] = getattr(n,'tremolo_marks',None)
     for f in _NOTE_FIELDS:
         d[f] = getattr(n, f, False)
     return d
@@ -522,6 +525,7 @@ def _create_beats(events, m_info, voice, num_strings, remap=None, harmonic_notes
 
         seen = set()
         sounding_until = {}
+        picking_notes = set()
         for ev in slots[pos]:
             note_dicts = (
                 ev.get("chord_notes", []) if ev["type"] == "chord" else [] if ev["type"] == "boundary" else [ev]
@@ -562,6 +566,7 @@ def _create_beats(events, m_info, voice, num_strings, remap=None, harmonic_notes
                     if label not in (beat.text or ""):
                         beat.text = ((beat.text or "") + "; " + label).strip("; ")
                 _apply_effects(note, nd)
+                if nd.get('picking_chain'):picking_notes.add(id(note))
                 if nd.get('mute') and nd['fret'] == 127 and not scrape:
                     marks = nd.get('slide_out_marks')
                     if isinstance(marks, list) and marks:
@@ -608,13 +613,17 @@ def _create_beats(events, m_info, voice, num_strings, remap=None, harmonic_notes
         cursor += duration_units(durations[0])
 
         for rd in durations[1:]:
-            owned=[n for n in beat.notes if contact_notes is not None and id(n) in contact_notes]
+            owned=[n for n in beat.notes if id(n) in picking_notes or contact_notes is not None and id(n) in contact_notes]
             if owned:
                 tied=guitarpro.Beat(voice,status=guitarpro.BeatStatus.normal);tied.duration=rd
                 for original in owned:
                     note=guitarpro.Note(tied,value=original.value,string=original.string,type=guitarpro.NoteType.tie)
                     tied.notes.append(note)
-                    contact_notes[id(note)]={**contact_notes[id(original)],'tie':True}
+                    if contact_notes is not None and id(original) in contact_notes:
+                        contact_notes[id(note)]={**contact_notes[id(original)],'tie':True}
+                    if id(original) in picking_notes:
+                        for effect in ('tremoloPicking','palmMute','harmonic','ghostNote','letRing'):
+                            setattr(note.effect,effect,deepcopy(getattr(original.effect,effect)))
                 beats.append(tied)
             else:beats.extend(_rest_beats(duration_units(rd), voice, grid))
             cursor += duration_units(rd)
@@ -651,7 +660,7 @@ def _adaptive_gap(beat, start, end, grid, measure, sounding_until, harmonic_note
                         continue
                     note = guitarpro.Note(current, value=original.value, string=original.string,
                                           type=guitarpro.NoteType.tie, velocity=original.velocity)
-                    for effect in ('palmMute', 'vibrato', 'harmonic', 'ghostNote'):
+                    for effect in ('palmMute', 'vibrato', 'harmonic', 'ghostNote', 'tremoloPicking', 'letRing'):
                         setattr(note.effect, effect, deepcopy(getattr(original.effect, effect)))
                     current.notes.append(note)
                     for mapping in (harmonic_notes, bar_notes, contact_notes):
@@ -713,10 +722,16 @@ def _apply_effects(gp_note, nd):
     if nd.get("palm_mute"):
         eff.palmMute = True
 
-    if nd.get("tremolo"):
+    picking, rate = tremolo_display.instruction(nd)
+    if rate:
         eff.tremoloPicking = guitarpro.TremoloPickingEffect(
-            duration=guitarpro.Duration(value=8),
+            duration=guitarpro.Duration(value=rate),
         )
+    elif picking:
+        # An unspecified/conflicting rate must not become an invented eighth.
+        # Keep the technique name, without a speed label.
+        if 'trem.' not in (gp_note.beat.text or ''):
+            gp_note.beat.text=((gp_note.beat.text or '')+' trem.').strip()
 
     if nd.get("accent"):
         eff.accentuatedNote = True
