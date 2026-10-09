@@ -165,3 +165,52 @@ def test_split_voice_source_remains_bound_to_its_authored_voice(tmp_path):
     projection['tracks'][0]['arrangements'][0]['voices']=[1]
     package.write('voices.json',projection)
     with pytest.raises(ValueError,match='voice'):strums.load_context(loaded,2)
+
+
+def ringing_package(root):
+    package = Package(root)
+    package.manifest['duration'] = 10
+    package.manifest['song_import']['preservationContract'] = 110
+    package.report['passages'][0].update(recordingStart=2, recordingEnd=3)
+    for track in ('0', '1'):
+        for note in package.charts[track]['notes']:
+            note['lr'] = True
+            note['let_ring_sus'] = 5
+    package.charts['hybrid']['notes'] = deepcopy(package.charts['0']['notes'] + package.charts['1']['notes'])
+    for note in package.charts['hybrid']['notes']:
+        edge = 2 if note['t'] < 2 else 3
+        note['let_ring_sus'] = round(edge - note['t'], 6)
+    return package
+
+
+def test_hybrid_ringing_limits_preserve_complete_strums_and_source(tmp_path):
+    package = ringing_package(tmp_path)
+    before = deepcopy(package.charts)
+    assert len(package.load()) == 2
+    assert package.charts == before
+
+
+@pytest.mark.parametrize('fault', ['longer', 'shorter', 'missing', 'pitch', 'timing', 'scored-duration', 'legacy'])
+def test_hybrid_ringing_does_not_weaken_note_validation(tmp_path, fault):
+    package = ringing_package(tmp_path)
+    note = package.charts['hybrid']['notes'][0]
+    if fault == 'longer': note['let_ring_sus'] += .1
+    if fault == 'shorter': note['let_ring_sus'] -= .1
+    if fault == 'missing': note.pop('let_ring_sus')
+    if fault == 'pitch': note['f'] += 1
+    if fault == 'timing': note['t'] += .1
+    if fault == 'scored-duration': note['sus'] += .1
+    if fault == 'legacy': package.manifest['song_import']['preservationContract'] = 109
+    with pytest.raises(ValueError, match='absent or changed'):
+        package.load()
+
+
+def test_next_selected_attack_can_remove_ringing_extension(tmp_path):
+    package = ringing_package(tmp_path)
+    # A selected source chord replaces the donor's ringing at its written end.
+    chord = {'t': 2.5, 'notes': [{'s': 0, 'f': 8, 'sus': .2}]}
+    package.charts['1']['chords'] = [chord]
+    package.charts['hybrid']['chords'] = [deepcopy(chord)]
+    package.report['passages'][0]['events'].append({'kind': 'chords', 'index': 0})
+    package.charts['hybrid']['notes'][3].pop('let_ring_sus')
+    assert len(package.load()) == 2

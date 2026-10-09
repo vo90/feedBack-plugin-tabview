@@ -4,6 +4,8 @@ This reads existing package evidence only. It never changes the arrangement,
 selects new passages, or infers a chord from nearby attacks.
 """
 from collections import Counter, defaultdict
+from bisect import bisect_right
+from copy import deepcopy
 import hashlib
 import json
 
@@ -54,10 +56,11 @@ def selected_sources(loaded, index, source_hash):
     main = report.get('mainTrackId')
     if main not in sources or not isinstance(report.get('mainEvents'), list):
         raise ValueError('Missing Hybrid strum main selection')
-    selections = [(main, report['mainEvents'])]
-    selections.extend((p['trackId'], p['events']) for p in report.get('passages', []))
+    selections = [(main, report['mainEvents'], None)]
+    selections.extend((p['trackId'], p['events'], p) for p in report.get('passages', []))
     seen = set()
-    for track, refs in selections:
+    selected = []
+    for track, refs, passage in selections:
         if track not in sources:
             raise ValueError('Unknown Hybrid strum selected source')
         original = sources[track]['chart']
@@ -67,14 +70,40 @@ def selected_sources(loaded, index, source_hash):
                     or not 0 <= i < len(original.get(kind, [])) or (track, kind, i) in seen):
                 raise ValueError('Invalid Hybrid strum event selection')
             seen.add((track, kind, i))
-            if kind != 'notes':
-                continue
-            note = original[kind][i]
-            key = _key(note)
-            if not available[key]:
-                raise ValueError('Selected Hybrid strum note is absent or changed')
-            available[key] -= 1
-            sources[track]['selected'][i] = ref
+            selected.append((track, kind, i, ref, original[kind][i], passage))
+
+    # Ringing is visual-only and may end at a guitar handover or a later
+    # same-string attack. Reconstruct those limits from the selected source
+    # events; keep every other field in the strict identity comparison.
+    ringing = recipe.get('preservationContract', 0) >= 110
+    attacks = defaultdict(set)
+    for _, kind, _, _, event, _ in selected:
+        for note in event['notes'] if kind == 'chords' else [event]:
+            attacks[note['s']].add(note.get('t', event['t']))
+    attacks = {s: sorted(times) for s, times in attacks.items()}
+    for track, kind, i, ref, event, passage in selected:
+        if kind != 'notes':
+            continue
+        note = deepcopy(event)
+        if ringing and 'let_ring_sus' in note:
+            t = note['t']
+            edge = (passage['recordingEnd'] if passage is not None else
+                    min((p['recordingStart'] for p in report.get('passages', [])
+                         if p['recordingStart'] > t), default=loaded.manifest['duration']))
+            times = attacks[note['s']]
+            next_index = bisect_right(times, t + 1e-8)
+            if next_index < len(times):
+                edge = min(edge, times[next_index])
+            span = min(note['let_ring_sus'], round(edge - t, 6))
+            if span <= note.get('sus', 0) + 1.1e-6:
+                del note['let_ring_sus']
+            else:
+                note['let_ring_sus'] = span
+        key = _key(note)
+        if not available[key]:
+            raise ValueError('Selected Hybrid strum note is absent or changed')
+        available[key] -= 1
+        sources[track]['selected'][i] = ref
     if any(available.values()):
         raise ValueError('Hybrid notes are not fully described by the selection')
     return sources
