@@ -12,17 +12,27 @@ def display_events(events, measures):
     existing={}
     times={e['time'] for e in events}
     times.update(m['start_time'] for m in measures)
+    anchors=sorted(times)
+    def display_boundary(time):
+        # Adding a relative duration can differ from the same authored onset
+        # by floating-point noise. Only synthetic display edges may snap to
+        # the existing six-decimal clock; never merge actual note attacks.
+        i=bisect_left(anchors,time)
+        nearby=anchors[max(0,i-1):i+1]
+        nearest=min(nearby,key=lambda t:abs(t-time)) if nearby else None
+        if nearest is not None and abs(nearest-time)<=1.1e-6:return nearest
+        return round(time,6)
     for event in events:
         for note in members(event):
             existing.setdefault((round(event['time'],6),note['string']),[]).append(note)
             if note.get('tremolo') and not note.get('display_tie'):
                 onset=note.get('performed_time',event['time'])
-                end=onset+note.get('sustain',0)
+                end=display_boundary(onset+note.get('sustain',0))
                 if end<=onset:continue
                 roots.append((event,note,onset,end))
                 times.add(end)
                 for m in note.get('tremolo_marks') or []:
-                    times.update((onset+m['start'],onset+m['end']))
+                    times.update((display_boundary(onset+m['start']),display_boundary(onset+m['end'])))
     times=sorted(times)
     added=[]
     for event,note,onset,end in roots:
