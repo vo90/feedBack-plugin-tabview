@@ -74,3 +74,24 @@ def test_eight_string_display_remap_ignores_synthetic_boundaries(monkeypatch):
     gp=export(song)
     assert len(gp.tracks[0].strings)==4
     assert len(attacks(gp))==4
+
+
+def test_synthetic_end_matches_existing_onset_despite_float_addition():
+    import tremolo_display
+    events=[dict(type='note',time=.1,string=0,fret=5,sustain=.2,tremolo=True,
+                 tremolo_marks=[mark([1,32],0,.2)]),
+            dict(type='note',time=.3,string=0,fret=7,sustain=.2)]
+    result=tremolo_display.display_events(events,[])
+    assert {e['time'] for e in result}=={.1,.3}
+    assert not any(e.get('display_tie') for e in result)
+    assert events[0]['time']==.1 and events[1]['time']==.3
+
+
+def test_end_rounding_never_merges_real_attacks():
+    import tremolo_display
+    events=[dict(type='note',time=.1,string=0,fret=5,sustain=.2,tremolo=True,
+                 tremolo_marks=[mark([1,32],0,.2)]),
+            dict(type='note',time=.3,string=0,fret=7,sustain=.2),
+            dict(type='note',time=.3000005,string=1,fret=9,sustain=.2)]
+    result=tremolo_display.display_events(events,[])
+    assert [e['time'] for e in result if e['type']=='note' and not e.get('display_tie')]==[.1,.3,.3000005]
