@@ -4,6 +4,7 @@ import io
 from types import SimpleNamespace as Obj
 import guitarpro
 import rs2gp
+from copy import deepcopy
 
 
 def harmonic_song():
@@ -34,3 +35,31 @@ def test_mapping_uses_generated_addresses_not_time_or_fret_guesses():
         assert e['sourceId'].startswith('note:')
     alias=bundle['harmonics'][-1]
     assert (alias['fret'],alias['naturalNode'],alias['naturalPitch'])==(15,14.7,34)
+
+
+def fallback_song():
+    song=harmonic_song()
+    song.arrangements[0].notes[1].harmonic_target={
+        'kind':'artificial','node':None,'interval':24,'policy':'harmonic',
+        'basis':'source-playback-fallback'}
+    song.arrangements[0].notes[1].palm_mute=True
+    return song
+
+
+def test_playback_pitch_and_unknown_contact_survive_tab_bundle_without_extra_notes():
+    song=fallback_song()
+    before=deepcopy(song)
+    bundle=rs2gp.arrangement_to_gp5(song,include_harmonics=True)
+    target=song.arrangements[0].notes[1].harmonic_target
+    entries=[e for e in bundle['harmonics'] if e['target']==target]
+    assert len(entries)==1
+    e=entries[0]
+    gp=guitarpro.parse(io.BytesIO(base64.b64decode(bundle['gp5'])))
+    n=next(n for n in gp.tracks[0].measures[e['bar']].voices[e['voice']].beats[e['beat']].notes
+           if n.string==e['gpString'])
+    assert n.value==12 and n.effect.palmMute
+    assert n.effect.harmonic is None
+    assert len(bundle['harmonics'])==6
+    assert song==before
+    e['target']['node']=5
+    assert song.arrangements[0].notes[1].harmonic_target['node'] is None

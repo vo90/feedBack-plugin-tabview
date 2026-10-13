@@ -101,9 +101,24 @@ function _tvApplyHarmonicMap(score, entries, model) {
         if (h) {
             const types={pinch:model.HarmonicType.Pinch,artificial:model.HarmonicType.Artificial,
                 tapped:model.HarmonicType.Tap,semi:model.HarmonicType.Pinch,feedback:model.HarmonicType.None};
-            if (!Object.hasOwn(types,h.kind) || !Number.isFinite(h.node)) throw new Error('Unsupported harmonic mapping');
-            n.harmonicType=types[h.kind];
-            n.harmonicValue=h.kind==='feedback' ? 0 : h.node;
+            const fallback=Object.keys(h).sort().join(',')==='basis,interval,kind,node,policy'
+                && h.kind==='artificial' && h.node===null && h.interval===24
+                && h.policy==='harmonic' && h.basis==='source-playback-fallback';
+            const nodes=new Map([[12,12],[7,19],[19,19],[5,24],[24,24],[4,28],[9,28],[16,28],
+                [3.2,31],[2.7,34],[5.8,34],[9.6,34],[14.7,34],[21.7,34],[2.4,36],[8.2,36],[17,36]]);
+            const policy={pinch:'harmonic',artificial:'harmonic',tapped:'harmonic',semi:'mixed',feedback:'attack_either'};
+            const canonical=Object.keys(h).sort().join(',')==='interval,kind,node,policy'
+                && Object.hasOwn(types,h.kind) && Number.isFinite(h.node) && Number.isInteger(h.interval)
+                && nodes.get(h.node)===h.interval && h.policy===policy[h.kind];
+            if (!fallback && !canonical) throw new Error('Unsupported harmonic mapping');
+            // alphaTab derives its harmonic notehead and touch number from one
+            // node value. With no known node, keep only the held fret and AH
+            // instruction; neither a made-up touch number nor a false pitched
+            // harmonic head should appear. Playback pitch stays in the sidecar.
+            n.harmonicType=fallback ? model.HarmonicType.None : types[h.kind];
+            n.harmonicValue=fallback || h.kind==='feedback' ? 0 : h.node;
+            if (fallback && !(beat.text || '').split(/\s+/).includes('AH'))
+                beat.text=((beat.text || '')+' AH').trim();
         } else {
             if (!Number.isFinite(e.naturalNode) || e.naturalNode<=0) throw new Error('Invalid natural harmonic mapping');
             n.harmonicType=model.HarmonicType.Natural;
